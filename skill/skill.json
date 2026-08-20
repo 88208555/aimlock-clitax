@@ -1,0 +1,10 @@
+{
+  "description": "Aimlock 把用户需求锁成可执行的智能目标，专门阻止思考漂移、执行漂移和范围膨胀。主智能体载入本技能后禁止立刻改代码，必须先把需求拆成 JSON 任务，并用范围合同分成 Lock、Probe、Swarm 三档。Lock 只覆盖单文件且变更预算明确的小改，主脑快照后改写并对账。Probe 先只读分析修改节点与上下游，确认一致后再写。Swarm 才调用蜂群派单认领。规划合同交给 Blueprint，计算工具交给 Calctool，执行编排交给 Swarm；Aimlock 只负责瞄准、闸门、插话融合与无分支快照。每次改前必须备份目标文件，禁止创建 git 分支，禁止用 worktree 冒充隔离。用户中途插入新需求时，主脑先判断是否与在跑任务关联：无关则另派临时智能体，有关则发信号更新 JSON 后继续；用户强制停止则立即停止。IDE 在目标未完成并即将交出控制权时，按九十秒间隔发送固定文案「智能目标持续执行中，请勿关闭！」。交付文档不是默认产物，必须由用户确认后才汇总。调用顺序为 capabilities、intake、classify、scope-contract：缺必填项不得进入下一操作。密钥与凭据不得写入公开页面或任务 JSON。本技能面向真实交付：每一步都有输入、规则与失败面，禁止把加载中、超时或未知状态当成空成功。用户可见说明只讲能力与对话配置方式，不出现外链。调用前必须先走 capabilities，再按 nextStep 前进；必填项未回答不得进入下一操作。日志只保存必要元数据，密钥不得写入公开页面。",
+  "displayName": "Aimlock",
+  "endpoint": "https://cli.tax/R3mQ8kWpXn",
+  "method": "POST",
+  "name": "aimlock",
+  "schemaVersion": "aimlock.skill.request/1.0",
+  "type": "Skill",
+  "version": "v5.0.2"
+}
