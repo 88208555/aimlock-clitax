@@ -5,6 +5,7 @@
   "description": "Aimlock skill installer for CLI.Tax: lock a user request into an executable aim and route Blueprint, Swarm, and Calctool.",
   "files": [
     "cli.mjs",
+    "installer.mjs",
     "README.md",
     "skill/SKILL.md",
     "skill/skill.json"
@@ -17,5 +18,5 @@
     "url": "https://github.com/88208555/aimlock-clitax.git"
   },
   "type": "module",
-  "version": "5.0.3"
+  "version": "5.0.4"
 }
