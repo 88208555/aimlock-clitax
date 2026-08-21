@@ -6,5 +6,5 @@
   "name": "aimlock",
   "schemaVersion": "aimlock.skill.request/1.0",
   "type": "Skill",
-  "version": "v5.0.2"
+  "version": "v5.0.3"
 }
