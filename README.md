@@ -9,4 +9,13 @@ Aimlock — 智能目标 skill（CLI.Tax 发布）。
 
 安装：`npx cli-aimlock@latest install`
 
+
+也可以直接从 CLI.Tax 对象存储安装（与站点「安装命令」一致）：
+
+```bash
+npx https://cli.tax/cli-downloads/clitax-R3mQ8kWpXn.tgz install
+```
+
 Source: https://github.com/88208555/aimlock-clitax.git
+
+反馈：技能详情页「使用评价」支持 好评 / 差评 / 日常聊天。好评与差评计入市场口碑（跑马灯每日清理），日常消息保留 7 天。
