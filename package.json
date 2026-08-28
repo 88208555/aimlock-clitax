@@ -2,36 +2,30 @@
   "bin": {
     "cli-aimlock": "./cli.mjs"
   },
-  "description": "Aimlock installer: locally bypass small low-risk work, or lock large, deep, cross-module, high-risk, parallel, and explicitly requested changes into an executable aim.",
+  "dependencies": {
+    "cli-swarm": "7.0.28"
+  },
+  "description": "Aimlock skill installer for CLI.Tax: lock a user request into an executable aim and route Blueprint, Swarm, and Calctool.",
   "files": [
     "cli.mjs",
-    "aimlock-local-fs.mjs",
-    "aimlock-context-map.mjs",
-    "aimlock-coordination.mjs",
-    "aimlock-local-gate.mjs",
-    "aimlock-local-runner.mjs",
-    "aimlock-runtime.mjs",
     "installer.mjs",
     "broker.mjs",
     "README.md",
     "skill/SKILL.md",
-    "skill/skill.json"
+    "skill/skill.json",
+    "aimlock-context-map.mjs",
+    "aimlock-coordination.mjs",
+    "aimlock-local-fs.mjs",
+    "aimlock-local-gate.mjs",
+    "aimlock-local-runner.mjs",
+    "aimlock-runtime.mjs"
   ],
   "license": "UNLICENSED",
   "name": "cli-aimlock",
-  "private": false,
-  "dependencies": {
-    "cli-swarm": "workspace:*"
-  },
-  "exports": {
-    "./coordination": "./aimlock-coordination.mjs",
-    "./local-runner": "./aimlock-local-runner.mjs",
-    "./runtime": "./aimlock-runtime.mjs"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/88208555/aimlock-clitax.git"
   },
   "type": "module",
-  "version": "7.0.25"
+  "version": "7.0.28"
 }
