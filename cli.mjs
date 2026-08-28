@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { cwd, stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
@@ -182,7 +183,7 @@ async function dispatchLocal(args) {
 }
 
 const cliPath = fileURLToPath(import.meta.url)
-if (process.argv[1] && resolve(process.argv[1]) === cliPath) {
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === cliPath) {
   if (process.argv[2] === 'local') {
     try {
       console.log(JSON.stringify(await dispatchLocal(process.argv.slice(3))))
