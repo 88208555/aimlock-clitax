@@ -1,185 +1,148 @@
-// aimlock Router：统一路由入口 + 技能注册表 + 执行链编排
-// 与 aimlock-runtime.mjs 配合；发布时由 pack 脚本拼接为自包含文件
+// Aimlock router: classify demand and order only server-resolved skill matches.
 
-const REGISTRY_VERSION = "1.2.0";
+const CHAIN_KINDS = Object.freeze([
+  "code-risky", "calculator", "page-new", "merge", "probe-only", "chat",
+]);
 
-// ---------- 技能注册表（8 技能） ----------
-// 每个技能必须有 whenToCall / whenNotToCall / prerequisites / chainPosition 四项
-const SKILL_REGISTRY = Object.freeze({
-  version: REGISTRY_VERSION,
-  skills: Object.freeze({
-    aimlock: { segment: "入口段", whenToCall: ["涉及代码/文件变更"], whenNotToCall: ["纯闲聊", "纯查询"], prerequisites: [], chainPosition: 0 },
-    blueprint: { segment: "规划段", whenToCall: ["多节点工程", "跨模块变更"], whenNotToCall: ["单文件小改"], prerequisites: ["aimlock"], chainPosition: 1 },
-    swarm: { segment: "执行段", whenToCall: ["并行/多任务拆单"], whenNotToCall: ["单文件单实现者"], prerequisites: ["aimlock"], chainPosition: 2 },
-    calctool: { segment: "生成段", whenToCall: ["计算工具", "公式固化", "指标测算"], whenNotToCall: ["纯展示页面", "无计算逻辑"], prerequisites: ["aimlock"], chainPosition: 2 },
-    "confirm-protocol": { segment: "交互层", whenToCall: ["需要用户结构化确认"], whenNotToCall: ["无需确认", "纯查询"], prerequisites: ["aimlock"], chainPosition: 3 },
-    archguard: { segment: "执行守卫段", whenToCall: ["新项目建架构合同", "已有合同的代码写入"], whenNotToCall: ["无合同的存量项目", "纯文档", "只读分析"], prerequisites: ["aimlock"], chainPosition: 4 },
-    mergeguard: { segment: "合并段", whenToCall: ["分支合并", "规则校验"], whenNotToCall: ["无版本对比需求"], prerequisites: ["swarm"], chainPosition: 5 },
-    validator: { segment: "验证段", whenToCall: ["交付前终审"], whenNotToCall: ["中间过程自检"], prerequisites: [], chainPosition: 6 },
-  }),
-});
-
-// ---------- 内置链路模板 ----------
-const CHAIN_TEMPLATES = Object.freeze({
-  "code-risky": ["aimlock", "blueprint", "swarm", "mergeguard", "validator"],
-  "code-risky-contract": ["aimlock", "blueprint", "swarm", "archguard", "mergeguard", "validator"],
-  "calculator": ["aimlock", "calctool", "validator"],
-  "page-new": ["aimlock", "archguard", "blueprint", "swarm", "validator"],
-  "merge": ["mergeguard", "validator"],
-  "probe-only": ["aimlock"],
-  "chat": [],
-});
-
-// ---------- 需求分类规则表（第一层：确定性匹配） ----------
 const CLASSIFY_RULES = [
-  { pattern: /计算器|公式|测算|对账|指标固化|在线测算|计算工具/i, product: "calculator", risk: "low", chain: "calculator" },
-  { pattern: /分支合并|合并代码|merge|冲突解决/i, product: "merge", risk: "medium", chain: "merge" },
-  { pattern: /纯查询|查看|读取|了解|咨询|闲聊/i, product: "none", risk: "low", chain: "chat" },
-  { pattern: /只读分析|分析代码|代码审查|review/i, product: "analysis", risk: "low", chain: "probe-only" },
-  { pattern: /新建页面|新建工具|新增功能|创建/i, product: "page", risk: "low", chain: "page-new" },
-  { pattern: /修改|更新|重构|修复|bug|调整|优化|改/i, product: "code", risk: "medium", chain: "code-risky" },
+  { priority: 60, pattern: /计算器|公式|测算|对账|指标固化|在线测算|计算工具/i, product: "calculator", risk: "low", chain: "calculator" },
+  { priority: 50, pattern: /分支合并|合并代码|merge|冲突解决/i, product: "merge", risk: "medium", chain: "merge" },
+  { priority: 40, pattern: /修改|更新|重构|修复|bug|调整|优化|改造|新增/i, product: "code", risk: "low", chain: "code-risky" },
+  { priority: 30, pattern: /新建页面|新建工具|创建页面|创建工具/i, product: "page", risk: "low", chain: "page-new" },
+  { priority: 20, pattern: /只读分析|分析代码|代码审查|review/i, product: "analysis", risk: "low", chain: "probe-only" },
+  { priority: 10, pattern: /纯查询|查看|读取|了解|咨询|闲聊/i, product: "none", risk: "low", chain: "chat" },
 ];
 const HIGH_RISK_PATTERNS = [/生产数据|支付|用户隐私|财务|密码|密钥|线上环境|production/i];
+const RISK_LEVEL = Object.freeze({ low: 0, medium: 1, high: 2 });
 
-// ---------- 分类器 ----------
+function strongestRisk(...values) {
+  return values.filter((value) => value in RISK_LEVEL)
+    .sort((left, right) => RISK_LEVEL[right] - RISK_LEVEL[left])[0] ?? "low";
+}
+
 function classifyDemand(input) {
   const goal = String(input?.goal ?? "").trim();
   if (!goal) return { findings: [{ severity: "P0", ruleId: "CLASSIFY_GOAL", entityRef: "input.goal", message: "goal is required for classification", evidence: { example: "修改税率常量" } }] };
-  // 第一层：确定性规则匹配
-  for (const rule of CLASSIFY_RULES) {
-    if (rule.pattern.test(goal)) {
-      const isHighRisk = HIGH_RISK_PATTERNS.some((p) => p.test(goal));
-      return { product: rule.product, risk: isHighRisk ? "high" : rule.risk, chain: rule.chain, confidence: 1.0, source: "rule" };
-    }
+  const declaredRisk = String(input?.risk ?? "").trim();
+  if (declaredRisk && !(declaredRisk in RISK_LEVEL)) {
+    return { findings: [{ severity: "P0", ruleId: "CLASSIFY_RISK", entityRef: "input.risk", message: "risk must be low, medium, or high", evidence: { example: "high" } }] };
+  }
+  const rule = CLASSIFY_RULES.filter((candidate) => candidate.pattern.test(goal))
+    .sort((left, right) => right.priority - left.priority)[0];
+  if (rule) {
+    const detectedRisk = HIGH_RISK_PATTERNS.some((pattern) => pattern.test(goal)) ? "high" : rule.risk;
+    const risk = strongestRisk(detectedRisk, declaredRisk, input?.modelClassification?.risk);
+    return { product: rule.product, risk, chain: rule.chain, confidence: 1, source: "rule" };
   }
   const assisted = input?.modelClassification;
-  const allowedProducts = new Set(["calculator", "merge", "none", "analysis", "page", "code"]);
-  const allowedRisks = new Set(["low", "medium", "high"]);
-  const allowedChains = new Set(Object.keys(CHAIN_TEMPLATES));
+  const products = new Set(["calculator", "merge", "none", "analysis", "page", "code"]);
+  const risks = new Set(["low", "medium", "high"]);
+  const chains = new Set(CHAIN_KINDS);
   if (assisted && typeof assisted === "object" && Number(assisted.confidence) >= 0.75
-    && allowedProducts.has(assisted.product) && allowedRisks.has(assisted.risk)
-    && allowedChains.has(assisted.chain)) {
-    return { product: assisted.product, risk: assisted.risk, chain: assisted.chain,
+    && products.has(assisted.product) && risks.has(assisted.risk) && chains.has(assisted.chain)) {
+    return { product: assisted.product, risk: strongestRisk(declaredRisk, assisted.risk), chain: assisted.chain,
       confidence: Number(assisted.confidence), source: "model-assisted" };
   }
-  // 第二层：未命中 → 需要追问
   return { product: null, risk: "unknown", chain: null, confidence: 0, source: "needs-clarification",
     question: "请描述您想实现的产物类型？", options: ["计算工具", "代码修改", "新建页面", "分支合并", "只读分析"] };
 }
 
-// ---------- 执行链计划 ----------
+function resolvedStepIds(input) {
+  if (!Array.isArray(input?.steps) || input.steps.some((step) => typeof step !== "string" || !step.trim())) {
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_STEPS", entityRef: "input.steps", message: "steps must be the server-resolved skill ids", evidence: { example: ["blueprint", "validator"] } }] };
+  }
+  const steps = [...new Set(input.steps.map((step) => step.trim()))];
+  if (steps.length !== input.steps.length) {
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_STEPS_DUPLICATE", entityRef: "input.steps", message: "steps must be unique", evidence: { example: steps } }] };
+  }
+  return { steps };
+}
+
 function buildChainPlan(input) {
-  const chainName = String(input?.chain ?? "").trim();
-  const hasArchitectureContract = input?.hasArchitectureContract === true;
-  const resolvedChain = chainName === "code-risky" && hasArchitectureContract
-    ? "code-risky-contract" : chainName;
-  const template = CHAIN_TEMPLATES[resolvedChain];
-  if (!template) {
-    return { findings: [{ severity: "P0", ruleId: "CHAIN_TEMPLATE", entityRef: "input.chain", message: `unknown chain: ${chainName}; valid: ${Object.keys(CHAIN_TEMPLATES).join(", ")}`, evidence: { example: "code-risky" } }] };
+  const chain = String(input?.chain ?? "").trim();
+  if (!CHAIN_KINDS.includes(chain)) {
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_KIND", entityRef: "input.chain", message: `unknown chain: ${chain}`, evidence: { example: "code-risky" } }] };
   }
-  const skip = new Set(Array.isArray(input?.skip) ? input.skip : []);
-  const risk = String(input?.risk ?? "low").trim();
-  const steps = template.filter((s) => !skip.has(s));
-  // 高风险锁定：validator 不可跳过
-  if (risk === "high" && skip.has("validator")) {
-    return { findings: [{ severity: "P0", ruleId: "HIGH_RISK_LOCK", entityRef: "input.skip", message: "validator cannot be skipped for high-risk demands", evidence: { example: "remove 'validator' from skip" } }] };
+  const resolved = resolvedStepIds(input);
+  if (resolved.findings) return resolved;
+  const steps = resolved.steps.flatMap((step) => step === "swarm"
+    ? ["coordinator.conflict-scan", "swarm"] : [step]);
+  const risk = String(input?.risk ?? "").trim();
+  if (!["low", "medium", "high"].includes(risk)) {
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_RISK", entityRef: "input.risk", message: "risk must be low, medium, or high", evidence: { example: "medium" } }] };
   }
-  const completedList = Array.isArray(input?.completed) ? input.completed : [];
-  if (new Set(completedList).size !== completedList.length
-    || completedList.some((step) => !steps.includes(step))) {
-    return { findings: [{ severity: "P0", ruleId: "CHAIN_COMPLETED_INVALID", entityRef: "input.completed", message: "completed must contain unique steps from the selected chain", evidence: { example: steps.slice(0, 1) } }] };
+  if (risk === "high" && !steps.includes("validator")) {
+    return { findings: [{ severity: "P0", ruleId: "HIGH_RISK_VALIDATOR", entityRef: "input.steps", message: "high-risk work requires a server-resolved validator step", evidence: { example: ["validator"] } }] };
   }
-  const expectedPrefix = steps.slice(0, completedList.length);
-  if (expectedPrefix.some((step, index) => step !== completedList[index])) {
-    return { findings: [{ severity: "P0", ruleId: "CHAIN_ORDER", entityRef: "input.completed", message: "completed steps must be an exact chain prefix", evidence: { example: expectedPrefix } }] };
+  const completed = Array.isArray(input?.completed) ? input.completed : [];
+  const expected = steps.slice(0, completed.length);
+  if (new Set(completed).size !== completed.length
+    || completed.some((step, index) => step !== expected[index])) {
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_ORDER", entityRef: "input.completed", message: "completed must be an exact chain prefix", evidence: { example: expected } }] };
   }
-  const current = steps[completedList.length] ?? null;
-  const ready = current ? [current] : [];
-  const blocked = current ? steps.slice(completedList.length + 1)
-    .map((step) => ({ step, waitingFor: [current] })) : [];
-  const architectureRecommendation = chainName === "code-risky" && !hasArchitectureContract
-    ? "Existing project has no architecture contract: continue without blocking and recommend contract-create for the next scoped change."
-    : null;
-  return { chain: steps, ready, blocked, current, totalSteps: steps.length,
-    completedSteps: completedList.length, risk, registryVersion: REGISTRY_VERSION, architectureRecommendation };
+  const current = steps[completed.length] ?? null;
+  return { chain: steps, chainKind: chain, ready: current ? [current] : [], current,
+    blocked: current ? steps.slice(completed.length + 1).map((step) => ({ step, waitingFor: [current] })) : [],
+    totalSteps: steps.length, completedSteps: completed.length, risk };
 }
 
-// ---------- 注册表操作 ----------
-function registerSkill(input) {
-  const skillId = String(input?.skillId ?? "").trim();
-  const whenToCall = input?.whenToCall;
-  const whenNotToCall = input?.whenNotToCall;
-  const prerequisites = input?.prerequisites;
-  const chainPosition = input?.chainPosition;
-  const findings = [];
-  if (!skillId) findings.push({ severity: "P0", ruleId: "REGISTER_ID", entityRef: "input.skillId", message: "skillId is required", evidence: { example: "my-skill" } });
-  if (!Array.isArray(whenToCall) || whenToCall.length === 0) findings.push({ severity: "P0", ruleId: "REGISTER_WHEN", entityRef: "input.whenToCall", message: "whenToCall must be a non-empty array", evidence: { example: ["trigger condition"] } });
-  if (!Array.isArray(whenNotToCall) || whenNotToCall.length === 0) findings.push({ severity: "P0", ruleId: "REGISTER_WHEN_NOT", entityRef: "input.whenNotToCall", message: "whenNotToCall must be a non-empty array", evidence: { example: ["exclusion condition"] } });
-  if (!Array.isArray(prerequisites)) findings.push({ severity: "P0", ruleId: "REGISTER_PREREQ", entityRef: "input.prerequisites", message: "prerequisites must be an array (empty if none)", evidence: { example: [] } });
-  if (typeof chainPosition !== "number" || chainPosition < 0) findings.push({ severity: "P0", ruleId: "REGISTER_POSITION", entityRef: "input.chainPosition", message: "chainPosition must be a non-negative integer", evidence: { example: 2 } });
-  if (SKILL_REGISTRY.skills[skillId]) findings.push({ severity: "P0", ruleId: "REGISTER_DUPLICATE", entityRef: "input.skillId", message: "skillId is already registered", evidence: { example: "new-skill" } });
-  if (findings.length) return { findings };
-  const registryEntry = { segment: String(input?.segment ?? "扩展段"), whenToCall: [...whenToCall],
-    whenNotToCall: [...whenNotToCall], prerequisites: [...prerequisites], chainPosition };
-  return { registered: true, applied: false, persistenceRequired: true, skillId,
-    registryVersion: REGISTRY_VERSION, registryEntry,
-    instruction: "Persist this validated registryEntry in the server registry before routing it." };
-}
-
-// ---------- 反馈操作 ----------
 function submitFeedback(input) {
+  const feedbackId = String(input?.feedbackId ?? "").trim();
   const fromSkill = String(input?.fromSkill ?? "").trim();
   const toSkill = String(input?.toSkill ?? "").trim();
   const reason = String(input?.reason ?? "").trim();
-  const demand = String(input?.demand ?? "").trim();
   const findings = [];
-  if (!fromSkill) findings.push({ severity: "P0", ruleId: "FEEDBACK_FROM", entityRef: "input.fromSkill", message: "fromSkill is required", evidence: { example: "calctool" } });
-  if (!toSkill) findings.push({ severity: "P0", ruleId: "FEEDBACK_TO", entityRef: "input.toSkill", message: "toSkill is required", evidence: { example: "swarm" } });
-  if (!reason) findings.push({ severity: "P0", ruleId: "FEEDBACK_REASON", entityRef: "input.reason", message: "reason is required", evidence: { example: "should have routed to calctool for formula work" } });
+  if (!feedbackId) findings.push({ severity: "P0", ruleId: "FEEDBACK_ID", entityRef: "input.feedbackId", message: "feedbackId is required", evidence: { example: "route-feedback-1" } });
+  if (!fromSkill) findings.push({ severity: "P0", ruleId: "FEEDBACK_FROM", entityRef: "input.fromSkill", message: "fromSkill is required", evidence: { example: "aimlock" } });
+  if (!toSkill) findings.push({ severity: "P0", ruleId: "FEEDBACK_TO", entityRef: "input.toSkill", message: "toSkill is required", evidence: { example: "validator" } });
+  if (!reason) findings.push({ severity: "P0", ruleId: "FEEDBACK_REASON", entityRef: "input.reason", message: "reason is required", evidence: { example: "routing repair" } });
   if (findings.length) return { findings };
-  const feedbackId = String(input?.feedbackId ?? "").trim();
-  if (!feedbackId) return { findings: [{ severity: "P0", ruleId: "FEEDBACK_ID", entityRef: "input.feedbackId", message: "feedbackId is required for auditable persistence", evidence: { example: "route-feedback-0001" } }] };
   return { recorded: true, applied: false, persistenceRequired: true, feedbackId,
-    record: { feedbackId, fromSkill, toSkill, reason, demand }, registryVersion: REGISTRY_VERSION,
-    instruction: "Persist this feedback record before updating any routing rule." };
+    record: { feedbackId, fromSkill, toSkill, reason, demand: String(input?.demand ?? "").trim() } };
 }
 
-// ---------- 链路进度查询 ----------
 function chainStatus(input) {
   const chainId = String(input?.chainId ?? "").trim();
   const steps = Array.isArray(input?.steps) ? input.steps : [];
   const completed = Array.isArray(input?.completed) ? input.completed : [];
   if (!chainId || steps.length === 0 || new Set(steps).size !== steps.length
     || completed.length > steps.length || completed.some((step, index) => step !== steps[index])) {
-    return { findings: [{ severity: "P0", ruleId: "CHAIN_STATUS_INVALID", entityRef: "input", message: "chainId is required and completed must be an exact prefix of unique steps", evidence: { example: { chainId: "chain-1", steps: ["aimlock", "validator"], completed: ["aimlock"] } } }] };
+    return { findings: [{ severity: "P0", ruleId: "CHAIN_STATUS_INVALID", entityRef: "input", message: "chainId is required and completed must be an exact prefix of unique steps", evidence: { example: { chainId: "chain-1", steps: ["validator"], completed: [] } } }] };
   }
-  const current = steps.find((s) => !completed.includes(s)) ?? null;
-  return { chainId, steps, completed, current, totalSteps: steps.length, completedSteps: completed.length, isComplete: completed.length >= steps.length && steps.length > 0 };
+  const current = steps[completed.length] ?? null;
+  return { chainId, steps, completed, current, totalSteps: steps.length,
+    completedSteps: completed.length, isComplete: completed.length === steps.length };
 }
 
-export { REGISTRY_VERSION, SKILL_REGISTRY, CHAIN_TEMPLATES, CLASSIFY_RULES, HIGH_RISK_PATTERNS, classifyDemand, buildChainPlan, registerSkill, submitFeedback, chainStatus };
+export { CHAIN_KINDS, CLASSIFY_RULES, HIGH_RISK_PATTERNS, classifyDemand, buildChainPlan, submitFeedback, chainStatus };
+import { createHash } from "node:crypto";
+
 // aimlock runtime v7.0.0 — 统一路由入口 + 变更门禁。Self-contained after build concat.
-const REQUEST_SCHEMA = "aimlock.skill.request/1.0";
-const RESPONSE_SCHEMA = "aimlock.skill.response/1.0";
+const LEGACY_REQUEST_SCHEMA = "aimlock.skill.request/1.0";
+const LEGACY_RESPONSE_SCHEMA = "aimlock.skill.response/1.0";
+const REQUEST_SCHEMA = "aimlock.skill.request/1.1";
+const RESPONSE_SCHEMA = "aimlock.skill.response/1.1";
 const ERROR_SCHEMA = "aimlock.skill.error/1.0";
 const CONTRACT_SCHEMA = "aimlock.scope-contract/1.0";
 const COMPILER_NAME = "aimlock";
-const COMPILER_VERSION = "v7.0.19";
+const COMPILER_VERSION = "v7.0.25";
 const KEEP_ALIVE_SECONDS = 90;
 const KEEP_ALIVE_MESSAGE = "智能目标持续执行中，请勿关闭！";
-const LOCK_LINE_BUDGET = 20;
-const PROBE_LINE_BUDGET = 80;
+const BYPASS_LINE_BUDGET = 500;
+const LOCK_LINE_BUDGET = 500;
+const PROBE_LINE_BUDGET = 500;
 const PROBE_FILE_BUDGET = 3;
-const CATALOG_SCHEMA = "cli.tax.skill-catalog/1.0";
 const TEST_EVIDENCE_SCHEMA = "cli.tax.test-evidence/1.0";
+const SNAPSHOT_RECEIPT_SCHEMA = "aimlock.snapshot-receipt/1.0";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const SNAPSHOT_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const OPERATIONS = [
   "capabilities", "help", "intake", "classify", "scope-contract", "skill-route",
   "propose-nodes", "accept-nodes", "snapshot-plan", "mutate-gate",
   "continuity-check", "interrupt", "keep-alive", "delivery-doc", "validate-json",
   "snapshot-verify", "run-status",
-  "chain-plan", "chain-status", "registry-register", "feedback",
+  "chain-plan", "chain-status", "feedback",
 ];
 const PURE_OPERATIONS = new Set(OPERATIONS);
 const OPERATION_CATALOG = Object.freeze(OPERATIONS.map((operation) => ({ operation, summary: operation })));
@@ -188,20 +151,24 @@ const OPERATION_SCHEMAS = Object.freeze({
   "classify": {
     input: {
       type: "object",
-      required: ["goal", "targetFiles", "estimatedChangedLines", "crossModule", "needParallel"],
+      required: ["goal", "targetFiles", "estimatedChangedLines", "difficulty", "risk",
+        "crossModule", "needParallel", "explicitAimlockRequested"],
       properties: {
         goal: { type: "string", minLength: 1 },
-        targetFiles: { type: "array", items: { type: "string" } },
+        targetFiles: { type: "array", minItems: 1, items: { type: "string" } },
         estimatedChangedLines: { type: "number", minimum: 0 },
+        difficulty: { type: "string", enum: ["low", "medium", "high"] },
+        risk: { type: "string", enum: ["low", "medium", "high"] },
         crossModule: { type: "boolean" },
         needParallel: { type: "boolean" },
+        explicitAimlockRequested: { type: "boolean" },
         modelClassification: {
           type: "object", optional: true,
           required: ["product", "risk", "chain", "confidence"],
           properties: {
             product: { type: "string", enum: ["calculator", "merge", "none", "analysis", "page", "code"] },
             risk: { type: "string", enum: ["low", "medium", "high"] },
-            chain: { type: "string", enum: Object.keys(CHAIN_TEMPLATES) },
+            chain: { type: "string", enum: CHAIN_KINDS },
             confidence: { type: "number", minimum: 0, maximum: 1 },
           },
         },
@@ -210,7 +177,10 @@ const OPERATION_SCHEMAS = Object.freeze({
     output: {
       type: "object",
       properties: {
-        mode: { type: "string", enum: ["lock", "probe", "swarm"] },
+        mode: { type: "string", enum: ["bypass", "lock", "probe", "swarm"] },
+        useAimlock: { type: "boolean" },
+        explicitAimlockRequested: { type: "boolean" },
+        friendlyNotice: { type: "object", optional: true },
         product: { type: ["string", "null"] },
         risk: { type: "string" },
         chain: { type: ["string", "null"] },
@@ -249,16 +219,22 @@ const OPERATION_SCHEMAS = Object.freeze({
   "skill-route": {
     input: {
       type: "object",
-      required: ["mode", "goalKind", "hasBlueprint"],
+      required: ["mode", "goalKind", "risk", "hasBlueprint", "contractUnclear", "hasArchitectureContract",
+        "newProject", "requiresConfirmation", "requiresCalculator", "requiresMerge",
+        "requiresValidation", "serverResolvedSkills"],
       properties: {
-        mode: { type: "string", enum: ["lock", "probe", "swarm"] },
+        mode: { type: "string", enum: ["bypass", "lock", "probe", "swarm"] },
         goalKind: { type: "string", enum: ["code", "calculator", "mixed", "docs"] },
+        risk: { type: "string", enum: ["low", "medium", "high"] },
         hasBlueprint: { type: "boolean" },
-        hasArchitectureContract: { type: "boolean", optional: true },
-        newProject: { type: "boolean", optional: true },
-        requiresConfirmation: { type: "boolean", optional: true },
-        useRegistry: { type: "boolean", optional: true, description: "use server-side registry instead of full catalog" },
-        officialCatalog: { type: "object", optional: true, description: "full catalog object (legacy mode)" },
+        contractUnclear: { type: "boolean" },
+        hasArchitectureContract: { type: "boolean" },
+        newProject: { type: "boolean" },
+        requiresConfirmation: { type: "boolean" },
+        requiresCalculator: { type: "boolean" },
+        requiresMerge: { type: "boolean" },
+        requiresValidation: { type: "boolean" },
+        serverResolvedSkills: { type: "array", description: "server-authoritative matched skills only" },
         userSpecifiedSkills: { type: "array", items: { type: "string" }, optional: true },
       },
     },
@@ -272,11 +248,10 @@ const OPERATION_SCHEMAS = Object.freeze({
   "mutate-gate": {
     input: {
       type: "object",
-      required: ["accepted", "snapshotId", "snapshotVerified", "contract", "nodes"],
+      required: ["accepted", "receipt", "contract", "nodes"],
       properties: {
         accepted: { type: "boolean", description: "must be true to proceed" },
-        snapshotId: { type: "string" },
-        snapshotVerified: { type: "boolean", description: "must be true after snapshot-verify succeeds" },
+        receipt: { type: "object", description: "binding receipt returned by snapshot-verify" },
         nodes: { type: "array", minItems: 1, description: "non-empty array of Node objects" },
         contract: { type: "object", description: "scope-contract object" },
       },
@@ -363,10 +338,11 @@ const OPERATION_SCHEMAS = Object.freeze({
   "snapshot-plan": {
     input: {
       type: "object",
-      required: ["runId", "paths"],
+      required: ["runId", "contract", "nodes"],
       properties: {
         runId: { type: "string" },
-        paths: { type: "array", items: { type: "string" }, description: "non-empty array of file paths to snapshot" },
+        contract: { type: "object", description: "accepted scope-contract object" },
+        nodes: { type: "array", minItems: 1, description: "accepted modification nodes" },
       },
     },
     output: {
@@ -405,9 +381,11 @@ const OPERATION_SCHEMAS = Object.freeze({
   "snapshot-verify": {
     input: {
       type: "object",
-      required: ["snapshotId", "files"],
+      required: ["snapshotId", "contract", "nodes", "files"],
       properties: {
         snapshotId: { type: "string" },
+        contract: { type: "object", description: "accepted scope-contract object" },
+        nodes: { type: "array", minItems: 1, description: "accepted modification nodes" },
         files: {
           type: "array", minItems: 1,
           items: {
@@ -427,6 +405,7 @@ const OPERATION_SCHEMAS = Object.freeze({
         verified: { type: "boolean" },
         snapshotId: { type: "string" },
         fileCount: { type: "number" },
+        receipt: { type: "object", description: "contract/node/path bound snapshot receipt" },
       },
     },
   },
@@ -460,11 +439,11 @@ const OPERATION_SCHEMAS = Object.freeze({
   "chain-plan": {
     input: {
       type: "object",
-      required: ["chain", "risk"],
+      required: ["chain", "risk", "steps"],
       properties: {
         chain: { type: "string", enum: ["code-risky", "calculator", "page-new", "merge", "probe-only", "chat"] },
         risk: { type: "string", enum: ["low", "medium", "high"] },
-        skip: { type: "array", items: { type: "string" }, optional: true },
+        steps: { type: "array", items: { type: "string" } },
         completed: { type: "array", items: { type: "string" }, optional: true },
       },
     },
@@ -496,31 +475,6 @@ const OPERATION_SCHEMAS = Object.freeze({
         chainId: { type: "string" },
         current: { type: "string" },
         isComplete: { type: "boolean" },
-      },
-    },
-  },
-  "registry-register": {
-    input: {
-      type: "object",
-      required: ["skillId", "whenToCall", "whenNotToCall", "prerequisites", "chainPosition"],
-      properties: {
-        skillId: { type: "string" },
-        whenToCall: { type: "array", items: { type: "string" }, minItems: 1 },
-        whenNotToCall: { type: "array", items: { type: "string" }, minItems: 1 },
-        prerequisites: { type: "array", items: { type: "string" } },
-        chainPosition: { type: "number", description: "non-negative integer" },
-        segment: { type: "string", optional: true },
-      },
-    },
-    output: {
-      type: "object",
-      properties: {
-        registered: { type: "boolean" },
-        applied: { type: "boolean" },
-        persistenceRequired: { type: "boolean" },
-        skillId: { type: "string" },
-        registryVersion: { type: "string" },
-        registryEntry: { type: "object" },
       },
     },
   },
@@ -577,8 +531,8 @@ const OPERATION_SCHEMAS = Object.freeze({
           required: ["goal", "mode", "tasks"],
           properties: {
             goal: { type: "string" },
-            mode: { type: "string", enum: ["lock", "probe", "swarm"] },
-            contract: { type: "object" },
+            mode: { type: "string", enum: ["bypass", "lock", "probe", "swarm"] },
+            contract: { type: "object", optional: true },
             tasks: { type: "array" },
           },
         },
@@ -648,7 +602,9 @@ const OPERATION_SCHEMAS = Object.freeze({
 });
 
 const GOAL_KINDS = new Set(["code", "calculator", "mixed", "docs"]);
-const MODES = new Set(["lock", "probe", "swarm"]);
+const MODES = new Set(["bypass", "lock", "probe", "swarm"]);
+const DIFFICULTIES = new Set(["low", "medium", "high"]);
+const RISKS = new Set(["low", "medium", "high"]);
 
 function text(value) { return String(value ?? ""); }
 function isObject(value) {
@@ -696,19 +652,54 @@ function requireStringArray(input, key) {
   }
   return { value: input[key] };
 }
+function requireChoice(input, key, choices) {
+  const value = text(input?.[key]).trim();
+  if (!choices.has(value)) {
+    return { error: finding("P0", "REQUIRED_FIELD", `input.${key}`, `${key} has an invalid value`, { example: [...choices][0] }) };
+  }
+  return { value };
+}
 function collect(parts) { return parts.filter((p) => p.error).map((p) => p.error); }
 
+function canonicalJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("snapshot binding contains a non-finite number");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (!isObject(value)) throw new Error("snapshot binding must be JSON serializable");
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+function digest(value) { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
+function requireSnapshotIdentifier(input, key) {
+  const candidate = requireText(input, key);
+  if (candidate.error) return candidate;
+  if (!SNAPSHOT_IDENTIFIER_PATTERN.test(candidate.value) || candidate.value === "." || candidate.value === "..") {
+    return { error: finding("P0", "SNAPSHOT_IDENTIFIER", `input.${key}`, `${key} must be a safe identifier without path separators`, { example: "run-1" }) };
+  }
+  return candidate;
+}
+
 const FIRST_USE_NOTICE = Object.freeze({
-  zh: "默认只走官方技能，并按需求匹配能力。用户点名的额外技能才进入候选。链路无关或自行扩展的技能不得调用。",
-  en: "Default to official skills and match capability to the demand. Extra skills enter only when the user names them. Do not call chain-unrelated or self-extended skills.",
-  ru: "По умолчанию только официальные навыки, сопоставляемые с потребностью. Чужие навыки — только если пользователь назвал их.",
+  zh: "Aimlock 仅用于大型、深度、跨模块、高风险或并行修改，以及用户明确要求 Aimlock 的修改。未明确要求 Aimlock 的小型低难度需求应直接处理，或只调用一个匹配的专项技能。",
+  en: "Use Aimlock only for large, deep, cross-module, high-risk, parallel, or explicitly requested changes. Handle small low-difficulty work directly or use one matched specialist unless Aimlock was explicitly requested.",
+  ru: "Aimlock применяется только для крупных, сложных, межмодульных, рискованных, параллельных или явно назначенных изменений. Небольшую простую задачу выполняйте напрямую либо одним профильным навыком, если Aimlock не потребован явно.",
+});
+const BYPASS_NOTICE = Object.freeze({
+  zh: "需求较小且低风险，不建议使用 Aimlock；请直接处理，或只调用一个匹配的专项技能。",
+  en: "This request is small and low risk; Aimlock is not recommended. Handle it directly or use one matched specialist skill.",
+  ru: "Запрос небольшой и низкорисковый; Aimlock не рекомендуется. Выполните его напрямую либо используйте один профильный навык.",
 });
 const INTAKE_QUESTIONS = Object.freeze([
   { id: "goal", required: true, prompt: "What must be true when this finishes, and what must never change?", example: "只改税率常量一行，不改其它计税逻辑" },
   { id: "targetFiles", required: true, prompt: "Which file paths are in scope? Use unknown if not located yet.", example: "apps/web/src/tax.ts" },
   { id: "estimatedChangedLines", required: true, prompt: "How many lines should change?", example: "1" },
+  { id: "difficulty", required: true, prompt: "Difficulty: low, medium, or high.", example: "low" },
+  { id: "risk", required: true, prompt: "Risk: low, medium, or high.", example: "low" },
   { id: "crossModule", required: true, prompt: "Does this cross modules? yes or no.", example: "no" },
   { id: "needParallel", required: true, prompt: "Must independent modules run in parallel? yes or no.", example: "no" },
+  { id: "explicitAimlockRequested", required: true, prompt: "Did the user explicitly require Aimlock for this change? yes or no.", example: "no" },
   { id: "goalKind", required: true, prompt: "Goal kind: code, calculator, mixed, or docs.", example: "code" },
   { id: "deliveryDoc", required: true, prompt: "After success, summarize a local delivery document? yes or no.", example: "no" },
 ]);
@@ -717,27 +708,53 @@ function classifyMode(input) {
   const goal = requireText(input, "goal");
   const targetFiles = requireStringArray(input, "targetFiles");
   const lines = requireNumber(input, "estimatedChangedLines");
+  const difficulty = requireChoice(input, "difficulty", DIFFICULTIES);
+  const risk = requireChoice(input, "risk", RISKS);
   const crossModule = requireBoolean(input, "crossModule");
   const needParallel = requireBoolean(input, "needParallel");
-  const findings = collect([goal, targetFiles, lines, crossModule, needParallel]);
+  const explicitAimlockRequested = requireBoolean(input, "explicitAimlockRequested");
+  const findings = collect([goal, targetFiles, lines, difficulty, risk, crossModule,
+    needParallel, explicitAimlockRequested]);
+  if (targetFiles.value && targetFiles.value.length === 0) {
+    findings.push(finding("P0", "TARGET_FILES_EMPTY", "input.targetFiles", "targetFiles must not be empty", { example: ["src/file.ts"] }));
+  }
   if (findings.length) return { findings };
+  const hasUnknownTarget = targetFiles.value.some((value) => value.trim().toLowerCase() === "unknown");
+  const bypass = lines.value <= BYPASS_LINE_BUDGET && difficulty.value === "low"
+    && crossModule.value === false && risk.value !== "high" && needParallel.value === false
+    && explicitAimlockRequested.value === false;
+  if (bypass) {
+    return { mode: "bypass", useAimlock: false, reason: "small low-difficulty demand",
+      friendlyNotice: BYPASS_NOTICE, goal: goal.value, targetFiles: targetFiles.value,
+      estimatedChangedLines: lines.value, difficulty: difficulty.value,
+      explicitAimlockRequested: explicitAimlockRequested.value };
+  }
   const fileCount = targetFiles.value.length;
-  const lockable = fileCount === 1 && lines.value <= LOCK_LINE_BUDGET && crossModule.value === false && needParallel.value === false;
-  const probeable = fileCount <= PROBE_FILE_BUDGET && lines.value <= PROBE_LINE_BUDGET && needParallel.value === false;
+  const lockable = !hasUnknownTarget && fileCount === 1 && lines.value <= LOCK_LINE_BUDGET
+    && crossModule.value === false && needParallel.value === false;
+  const probeable = fileCount <= PROBE_FILE_BUDGET && lines.value <= PROBE_LINE_BUDGET && crossModule.value === false && needParallel.value === false;
   const mode = lockable ? "lock" : probeable ? "probe" : "swarm";
-  return { mode, reason: lockable ? "single-file change within lock budget" : probeable ? "bounded change needs read-only probe before mutate" : "cross-module, parallel, or over-budget work uses swarm", goal: goal.value, targetFiles: targetFiles.value, estimatedChangedLines: lines.value };
+  return { mode, useAimlock: true,
+    reason: lockable ? "single-file guarded change" : probeable ? "bounded guarded change" : "deep, over-three-file, cross-module, parallel, high-risk, or over-budget work",
+    goal: goal.value, targetFiles: targetFiles.value, estimatedChangedLines: lines.value,
+    difficulty: difficulty.value, explicitAimlockRequested: explicitAimlockRequested.value };
 }
 
-function normalizedPrefix(value) {
-  const normalized = text(value).trim().replace(/\/{2,}/g, "/").replace(/\/+$/g, "");
-  return normalized || "/";
+function safeRelativePath(value) {
+  const source = text(value).trim().replace(/\\/g, "/");
+  if (!source || source.startsWith("/") || source.startsWith("~") || source.includes(":")
+    || /[\u0000-\u001f\u007f]/.test(source)) return null;
+  const parts = source.split("/").filter(Boolean);
+  const windowsDevice = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
+  if (parts.length === 0 || parts.some((part) => part === "." || part === ".."
+    || /[. ]$/.test(part) || windowsDevice.test(part))) return null;
+  return parts.join("/");
 }
 function matchesPrefix(filePath, prefixes) {
-  const normalizedPath = normalizedPrefix(filePath);
-  return prefixes.some((value) => {
-    const prefix = normalizedPrefix(value);
-    return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
-  });
+  const normalizedPath = safeRelativePath(filePath);
+  return normalizedPath !== null && prefixes.some((prefix) => (
+    normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)
+  ));
 }
 function pathAllowed(filePath, contract) {
   return !matchesPrefix(filePath, contract.forbiddenPaths) && matchesPrefix(filePath, contract.allowedPaths);
@@ -749,18 +766,20 @@ function readContract(input) {
     return { findings: [finding("P0", "CONTRACT_OBJECT", "input.contract", "contract must be an object", { example: { allowedPaths: ["src/"], maxChangedLines: 50, allowNewFiles: false, allowDeleteFiles: false } })] };
   }
   const allowedPaths = requireStringArray(contract, "allowedPaths");
-  const forbiddenPaths = Array.isArray(contract.forbiddenPaths) ? { value: contract.forbiddenPaths.filter((item) => typeof item === "string") } : { value: [] };
-  if (Array.isArray(contract.forbiddenPaths) === false && contract.forbiddenPaths !== undefined) {
-    return { findings: [finding("P0", "CONTRACT_FORBIDDEN", "input.contract.forbiddenPaths", "forbiddenPaths must be a string array when present", { example: ["tests/"] })] };
-  }
+  const forbiddenPaths = contract.forbiddenPaths === undefined
+    ? { value: [] } : requireStringArray(contract, "forbiddenPaths");
   const maxChangedLines = requireNumber(contract, "maxChangedLines");
   const allowNewFiles = requireBoolean(contract, "allowNewFiles");
   const allowDeleteFiles = requireBoolean(contract, "allowDeleteFiles");
-  const findings = collect([allowedPaths, maxChangedLines, allowNewFiles, allowDeleteFiles]);
+  const findings = collect([allowedPaths, forbiddenPaths, maxChangedLines, allowNewFiles, allowDeleteFiles]);
   if (allowedPaths.value && allowedPaths.value.length === 0) findings.push(finding("P0", "CONTRACT_ALLOWED", "input.contract.allowedPaths", "allowedPaths must not be empty", { example: ["src/"] }));
   if (maxChangedLines.value === 0) findings.push(finding("P0", "CONTRACT_BUDGET", "input.contract.maxChangedLines", "maxChangedLines must be > 0", { example: 50 }));
+  const normalizedAllowed = allowedPaths.value?.map(safeRelativePath) ?? [];
+  const normalizedForbidden = forbiddenPaths.value?.map(safeRelativePath) ?? [];
+  if (normalizedAllowed.some((value) => value === null)) findings.push(finding("P0", "CONTRACT_ALLOWED_PATH", "input.contract.allowedPaths", "allowedPaths must contain safe relative paths without dot segments", { example: ["src/"] }));
+  if (normalizedForbidden.some((value) => value === null)) findings.push(finding("P0", "CONTRACT_FORBIDDEN_PATH", "input.contract.forbiddenPaths", "forbiddenPaths must contain safe relative paths without dot segments", { example: ["secrets/"] }));
   if (findings.length) return { findings };
-  return { contract: { schemaVersion: CONTRACT_SCHEMA, allowedPaths: allowedPaths.value, forbiddenPaths: forbiddenPaths.value, maxChangedLines: maxChangedLines.value, allowNewFiles: allowNewFiles.value, allowDeleteFiles: allowDeleteFiles.value } };
+  return { contract: { schemaVersion: CONTRACT_SCHEMA, allowedPaths: normalizedAllowed, forbiddenPaths: normalizedForbidden, maxChangedLines: maxChangedLines.value, allowNewFiles: allowNewFiles.value, allowDeleteFiles: allowDeleteFiles.value } };
 }
 
 function validateNodes(input) {
@@ -771,6 +790,8 @@ function validateNodes(input) {
   }
   const findings = [];
   let estimatedSum = 0;
+  const normalizedNodes = [];
+  const seenPaths = new Set();
   for (const [index, node] of input.nodes.entries()) {
     const ref = `input.nodes[${index}]`;
     if (!isObject(node)) {
@@ -778,17 +799,24 @@ function validateNodes(input) {
       continue;
     }
     const filePath = text(node.path).trim();
+    const normalizedFilePath = safeRelativePath(filePath);
     const reason = text(node.reason).trim();
     const estimatedLines = node.estimatedLines;
     if (!filePath) findings.push(finding("P0", "NODE_PATH", `${ref}.path`, "path is required", { example: "src/tax.ts" }));
+    else if (normalizedFilePath === null) findings.push(finding("P0", "NODE_PATH_UNSAFE", `${ref}.path`, "path must be a safe relative path without dot segments", { example: "src/tax.ts" }));
     if (!reason) findings.push(finding("P0", "NODE_REASON", `${ref}.reason`, "reason is required", { example: "update tax rate" }));
     if (typeof estimatedLines !== "number" || !Number.isFinite(estimatedLines) || estimatedLines < 0) {
       findings.push(finding("P0", "NODE_LINES", `${ref}.estimatedLines`, "estimatedLines must be a finite number >= 0", { example: 1 }));
     } else {
       estimatedSum += estimatedLines;
     }
-    if (filePath && !pathAllowed(filePath, parsed.contract)) {
+    if (normalizedFilePath !== null && !pathAllowed(normalizedFilePath, parsed.contract)) {
       findings.push(finding("P0", "NODE_OUT_OF_SCOPE", `${ref}.path`, `${filePath} is outside the scope contract`, { example: "allowedPaths: [\"src/\"]" }));
+    }
+    if (normalizedFilePath !== null && seenPaths.has(normalizedFilePath)) {
+      findings.push(finding("P0", "NODE_PATH_DUPLICATE", `${ref}.path`, "node paths must be unique", { example: normalizedFilePath }));
+    } else if (normalizedFilePath !== null) {
+      seenPaths.add(normalizedFilePath);
     }
     if (node.isNewFile === true && parsed.contract.allowNewFiles === false) {
       findings.push(finding("P0", "NODE_NEW_FILE", `${ref}.isNewFile`, "new files are forbidden by the contract", { example: false }));
@@ -799,126 +827,142 @@ function validateNodes(input) {
     if (node.diffType !== undefined && !["add", "modify", "delete"].includes(node.diffType)) {
       findings.push(finding("P0", "NODE_DIFF_TYPE", `${ref}.diffType`, "diffType must be add, modify, or delete", { example: "modify" }));
     }
+    if (normalizedFilePath !== null && reason
+      && typeof estimatedLines === "number" && Number.isFinite(estimatedLines) && estimatedLines >= 0) {
+      normalizedNodes.push({
+        path: normalizedFilePath, reason, estimatedLines,
+        diffType: node.diffType ?? (node.isDelete === true ? "delete" : node.isNewFile === true ? "add" : "modify"),
+        isNewFile: node.isNewFile === true, isDelete: node.isDelete === true,
+      });
+    }
   }
   if (estimatedSum > parsed.contract.maxChangedLines) {
     findings.push(finding("P0", "NODE_BUDGET", "input.nodes", `estimated ${estimatedSum} lines exceed maxChangedLines ${parsed.contract.maxChangedLines}`, { example: "maxChangedLines: 50" }));
   }
   if (findings.length) return { findings };
-  return { contract: parsed.contract, nodes: input.nodes, estimatedSum };
+  return { contract: parsed.contract, nodes: normalizedNodes, estimatedSum };
 }
 
-function hopAllowed(rule, demand, currentRole) {
-  if (currentRole === "user-specified" || !rule.fromRoles?.includes(currentRole)) {
-    return { call: false, reason: "chain-unrelated" };
-  }
-  if (rule.modes && !rule.modes.includes(demand.mode)) return { call: false, reason: rule.reasonSkip };
-  if (rule.goalKinds && !rule.goalKinds.includes(demand.goalKind)) {
-    return { call: false, reason: "capability-unrelated" };
-  }
-  if (rule.requiresHasBlueprintFalse && demand.hasBlueprint) return { call: false, reason: rule.reasonSkip };
-  if (rule.requiresArchitectureContractOrNewProject
-    && !demand.hasArchitectureContract && !demand.newProject) {
-    return { call: false, reason: rule.reasonSkip };
-  }
-  return { call: true, reason: rule.reasonCall };
+function officialMatchAllowed(slug, demand) {
+  const active = demand.mode !== "bypass";
+  const codeGoal = demand.goalKind === "code" || demand.goalKind === "mixed";
+  if (slug === "calctool") return demand.goalKind === "calculator" || demand.requiresCalculator;
+  if (slug === "confirm-protocol") return demand.requiresConfirmation;
+  if (slug === "archguard") return codeGoal && (demand.hasArchitectureContract || demand.newProject);
+  if (slug === "blueprint") return active && ["probe", "swarm"].includes(demand.mode)
+    && demand.contractUnclear && !demand.hasBlueprint;
+  if (slug === "swarm") return active && demand.mode === "swarm";
+  if (slug === "validator") return active && (demand.risk === "high" || demand.requiresValidation);
+  if (slug === "mergeguard") return active && demand.requiresMerge;
+  return slug !== "aimlock";
 }
 
-function matchCatalogHops(catalog, demand) {
-  const specified = new Set(demand.userSpecifiedSkills);
-  const current = catalog.skills.find((skill) => skill.runtimeCode === catalog.currentRuntimeCode);
-  const currentRole = current?.role ?? "user-specified";
-  return catalog.skills.map((skill) => {
-    if (skill.runtimeCode === catalog.currentRuntimeCode) return { ...skill, call: false, analyze: false, reason: "self" };
-    if (!skill.official && !specified.has(skill.runtimeCode)) return { ...skill, call: false, analyze: false, reason: "extension-unrelated" };
-    if (!catalog.hopsEnabled) return { ...skill, call: false, analyze: false, reason: "extension-unrelated" };
-    if (!skill.official) return { ...skill, call: false, analyze: true, reason: "user-specified: confirm capabilities match the demand before invoke" };
-    const rule = catalog.hopRules.find((item) => item.role === skill.role);
-    if (!rule) return { ...skill, call: false, analyze: false, reason: "extension-unrelated" };
-    return { ...skill, analyze: false, ...hopAllowed(rule, demand, currentRole) };
-  });
+function validateResolvedSkills(input, demand) {
+  if (!Array.isArray(input?.serverResolvedSkills)) {
+    return { findings: [finding("P0", "ROUTE_RESOLUTION_REQUIRED", "input.serverResolvedSkills", "server-resolved skill matches are required", { example: [] })] };
+  }
+  if (demand.mode === "bypass" && input.serverResolvedSkills.length > 1) {
+    return { findings: [finding("P0", "BYPASS_SINGLE_SKILL", "input.serverResolvedSkills", "bypass may recommend at most one specialist skill", { example: [] })] };
+  }
+  const specified = new Set(Array.isArray(input.userSpecifiedSkills) ? input.userSpecifiedSkills : []);
+  const findings = [];
+  for (const [index, skill] of input.serverResolvedSkills.entries()) {
+    const ref = `input.serverResolvedSkills[${index}]`;
+    if (!isObject(skill) || !/^[A-Za-z0-9]{10}$/.test(text(skill.runtimeCode))
+      || !text(skill.slug).trim() || typeof skill.call !== "boolean" || typeof skill.analyze !== "boolean") {
+      findings.push(finding("P0", "ROUTE_MATCH_SHAPE", ref, "resolved skill shape is invalid", { example: { runtimeCode: "AbCdEfGh12", slug: "skill", call: true, analyze: false } }));
+      continue;
+    }
+    if (!skill.call && !(skill.analyze && specified.has(skill.runtimeCode))) {
+      findings.push(finding("P0", "ROUTE_MATCH_AUTHORITY", ref, "resolved skill must be callable or an explicitly named analysis candidate", { example: true }));
+    }
+    if (skill.official !== false && !officialMatchAllowed(skill.slug, demand)) {
+      findings.push(finding("P0", "ROUTE_CAPABILITY_MISMATCH", ref, `${skill.slug} does not match this demand`, { example: demand.goalKind }));
+    }
+  }
+  return findings.length ? { findings } : { skills: input.serverResolvedSkills };
 }
 
 function routeSkills(input) {
-  const modeText = text(input?.mode).trim();
-  const kindText = text(input?.goalKind).trim();
-  const findings = [];
-  if (!MODES.has(modeText)) findings.push(finding("P0", "MODE_REQUIRED", "input.mode", "mode must be lock, probe, or swarm", { example: "lock" }));
-  if (!GOAL_KINDS.has(kindText)) findings.push(finding("P0", "GOAL_KIND", "input.goalKind", "goalKind must be code, calculator, mixed, or docs", { example: "code" }));
-  const hasBlueprint = requireBoolean(input, "hasBlueprint");
-  if (hasBlueprint.error) findings.push(hasBlueprint.error);
-  const specified = input?.userSpecifiedSkills;
-  const hasArchitectureContract = input?.hasArchitectureContract === true;
-  const newProject = input?.newProject === true;
-  const requiresConfirmation = input?.requiresConfirmation === true;
-  if (specified !== undefined && (!Array.isArray(specified) || specified.some((item) => typeof item !== "string")))
-    findings.push(finding("P0", "USER_SPECIFIED", "input.userSpecifiedSkills", "userSpecifiedSkills must be a string array when present", { example: ["other-skill"] }));
-  // Router 模式：使用服务端注册表（不再要求调用方回传完整 officialCatalog）
-  if (input?.useRegistry === true || input?.registryVersion) {
-    if (findings.length) return { findings };
-    const hops = Object.entries(SKILL_REGISTRY.skills).map(([id, reg]) => {
-      if (id === "aimlock") return { skillId: id, call: false, reason: "self" };
-      const explicitlyRequested = specified?.includes(id) === true;
-      if (id === "blueprint") return { skillId: id,
-        call: newProject || (modeText !== "lock" && !hasBlueprint.value),
-        reason: newProject ? "plan after architecture contract" : "planning contract when needed", segment: reg.segment };
-      if (id === "swarm") return { skillId: id, call: modeText === "swarm",
-        reason: "parallel dispatch only for swarm mode", segment: reg.segment };
-      if (id === "calctool") return { skillId: id,
-        call: kindText === "calculator" || kindText === "mixed",
-        reason: "calculator capability match", segment: reg.segment };
-      if (id === "confirm-protocol") return { skillId: id, call: requiresConfirmation,
-        reason: requiresConfirmation ? "structured user confirmation required" : "no confirmation requested", segment: reg.segment };
-      if (id === "archguard") return { skillId: id,
-        call: (kindText === "code" || kindText === "mixed")
-          && (hasArchitectureContract || newProject),
-        reason: newProject ? "create contract before planning"
-          : hasArchitectureContract ? "checkpoint code against existing contract"
-            : "existing project has no contract; recommend without blocking", segment: reg.segment };
-      if (id === "mergeguard") return { skillId: id, call: explicitlyRequested,
-        reason: explicitlyRequested ? "user requested merge guard" : "no merge requested", segment: reg.segment };
-      if (id === "validator") return { skillId: id, call: kindText !== "docs" || modeText !== "lock",
-        reason: "final deterministic delivery gate", segment: reg.segment };
-      return { skillId: id, call: false, reason: "capability-unrelated", segment: reg.segment };
-    });
-    return { hops, registryVersion: REGISTRY_VERSION };
+  const mode = text(input?.mode).trim();
+  const goalKind = text(input?.goalKind).trim();
+  const risk = requireChoice(input, "risk", RISKS);
+  const requiredBooleans = ["hasBlueprint", "contractUnclear", "hasArchitectureContract", "newProject",
+    "requiresConfirmation", "requiresCalculator", "requiresMerge", "requiresValidation"]
+    .map((key) => requireBoolean(input, key));
+  const findings = collect([risk, ...requiredBooleans]);
+  if (!MODES.has(mode)) findings.push(finding("P0", "MODE_REQUIRED", "input.mode", "mode must be bypass, lock, probe, or swarm", { example: "bypass" }));
+  if (!GOAL_KINDS.has(goalKind)) findings.push(finding("P0", "GOAL_KIND", "input.goalKind", "goalKind must be code, calculator, mixed, or docs", { example: "code" }));
+  if (input?.officialCatalog !== undefined || input?.useRegistry !== undefined) {
+    findings.push(finding("P0", "FULL_CATALOG_FORBIDDEN", "input", "full catalogs and local registries are forbidden; the server injects only matched skills", { example: false }));
   }
-  // 兼容模式：回传完整 officialCatalog（向后兼容）
-  const catalog = input?.officialCatalog;
-  if (!isObject(catalog) || catalog.schemaVersion !== CATALOG_SCHEMA) {
-    if (typeof input?.catalogVersion === "string" && !isObject(catalog))
-      findings.push(finding("P1", "CATALOG_CACHED", "input.officialCatalog", "catalogVersion provided but officialCatalog missing; use cached catalog", { example: "use cached officialCatalog from capabilities response" }));
-    else findings.push(finding("P0", "CATALOG_REQUIRED", "input.officialCatalog", "officialCatalog from capabilities is required (or set useRegistry: true)", { example: { schemaVersion: "cli.tax.skill-catalog/1.0", skills: [], hopRules: [] } }));
-  }
-  if (isObject(catalog) && (!Array.isArray(catalog.skills) || !Array.isArray(catalog.hopRules)))
-    findings.push(finding("P0", "CATALOG_SHAPE", "input.officialCatalog", "officialCatalog.skills and hopRules must be arrays", { example: { skills: [], hopRules: [] } }));
   if (findings.length) return { findings };
-  return { hops: matchCatalogHops(catalog, { mode: modeText, goalKind: kindText,
-    hasBlueprint: hasBlueprint.value, hasArchitectureContract, newProject,
-    userSpecifiedSkills: specified ?? [] }) };
+  const demand = { mode, goalKind, risk: risk.value, hasBlueprint: input.hasBlueprint,
+    contractUnclear: input.contractUnclear,
+    hasArchitectureContract: input.hasArchitectureContract, newProject: input.newProject,
+    requiresConfirmation: input.requiresConfirmation, requiresCalculator: input.requiresCalculator,
+    requiresMerge: input.requiresMerge, requiresValidation: input.requiresValidation };
+  const resolved = validateResolvedSkills(input, demand);
+  if (resolved.findings) return resolved;
+  return { mode, hops: resolved.skills };
+}
+
+function snapshotBinding(input) {
+  const validated = validateNodes(input);
+  if (validated.findings) return validated;
+  const paths = validated.nodes.map((node) => node.path).sort();
+  return {
+    contract: validated.contract, nodes: validated.nodes, paths,
+    contractDigest: digest(validated.contract), nodeDigest: digest(validated.nodes),
+    pathDigest: digest(paths),
+  };
 }
 
 function snapshotPlan(input) {
-  const runId = requireText(input, "runId");
-  const paths = requireStringArray(input, "paths");
-  const findings = collect([runId, paths]);
+  const runId = requireSnapshotIdentifier(input, "runId");
+  const findings = collect([runId]);
   if (input?.createBranch === true || input?.gitBranch === true || input?.worktree === true) findings.push(finding("P0", "BRANCH_FORBIDDEN", "input", "Aimlock forbids git branches and worktrees; snapshot with file copies", { example: false }));
-  if (paths.value && paths.value.length === 0) findings.push(finding("P0", "SNAPSHOT_PATHS", "input.paths", "paths to snapshot must not be empty", { example: ["src/tax.ts"] }));
+  const binding = snapshotBinding(input);
+  if (binding.findings) findings.push(...binding.findings);
   if (findings.length) return { findings };
-  return { snapshot: { snapshotId: `snap-${runId.value}`, method: "file-copy", snapshotRoot: `.aimlock/snapshots/${runId.value}`, paths: paths.value, forbidGitBranch: true, forbidWorktree: true } };
+  const snapshotId = `snap-${runId.value}`;
+  return { snapshot: {
+    snapshotId, method: "file-copy", snapshotRoot: `.aimlock/snapshots/${runId.value}`,
+    paths: binding.paths, contractDigest: binding.contractDigest,
+    nodeDigest: binding.nodeDigest, pathDigest: binding.pathDigest,
+    forbidGitBranch: true, forbidWorktree: true,
+  } };
 }
 
 function mutateGate(input) {
   const accepted = requireBoolean(input, "accepted");
-  const snapshotId = requireText(input, "snapshotId");
-  const snapshotVerified = requireBoolean(input, "snapshotVerified");
-  const findings = collect([accepted, snapshotId, snapshotVerified]);
+  const findings = collect([accepted]);
   if (input?.createBranch === true || input?.gitBranch === true) findings.push(finding("P0", "BRANCH_FORBIDDEN", "input", "mutate must not create a git branch", { example: false }));
   if (accepted.value === false) findings.push(finding("P0", "MUTATE_NOT_ACCEPTED", "input.accepted", "mutate is forbidden until nodes are accepted", { example: true }));
-  if (snapshotVerified.value === false) findings.push(finding("P0", "SNAPSHOT_NOT_VERIFIED", "input.snapshotVerified", "mutate is forbidden until snapshot-verify succeeds", { example: true }));
-  const nodes = validateNodes(input);
-  if (nodes.findings) findings.push(...nodes.findings);
+  const binding = snapshotBinding(input);
+  if (binding.findings) findings.push(...binding.findings);
+  const receipt = input?.receipt;
+  if (!isObject(receipt)) {
+    findings.push(finding("P0", "SNAPSHOT_RECEIPT", "input.receipt", "a snapshot-verify receipt is required", { example: { schemaVersion: SNAPSHOT_RECEIPT_SCHEMA } }));
+  } else if (!binding.findings) {
+    const expectedKeys = ["contractDigest", "fileManifestDigest", "nodeDigest", "pathDigest", "paths", "receiptDigest", "schemaVersion", "snapshotId"];
+    const core = {
+      schemaVersion: receipt.schemaVersion, snapshotId: receipt.snapshotId,
+      contractDigest: receipt.contractDigest, nodeDigest: receipt.nodeDigest,
+      pathDigest: receipt.pathDigest, fileManifestDigest: receipt.fileManifestDigest,
+    };
+    const validId = requireSnapshotIdentifier({ snapshotId: receipt.snapshotId }, "snapshotId");
+    const validReceipt = Object.keys(receipt).sort().join("\n") === expectedKeys.join("\n")
+      && !validId.error && receipt.schemaVersion === SNAPSHOT_RECEIPT_SCHEMA
+      && receipt.contractDigest === binding.contractDigest
+      && receipt.nodeDigest === binding.nodeDigest && receipt.pathDigest === binding.pathDigest
+      && Array.isArray(receipt.paths) && digest(receipt.paths) === binding.pathDigest
+      && SHA256_PATTERN.test(receipt.fileManifestDigest)
+      && receipt.receiptDigest === digest(core);
+    if (!validReceipt) findings.push(finding("P0", "SNAPSHOT_RECEIPT_BINDING", "input.receipt", "snapshot receipt does not match the accepted contract, nodes, and paths", { example: binding.pathDigest }));
+  }
   if (findings.length) return { findings };
-  return { allowed: true, snapshotId: snapshotId.value };
+  return { allowed: true, snapshotId: receipt.snapshotId, receiptDigest: receipt.receiptDigest };
 }
 
 function validateTestEvidence(value, ref) {
@@ -1002,39 +1046,65 @@ function validateRunJson(project) {
   const f = [];
   if (!isObject(project)) return [finding("P0", "RUN_OBJECT", "input.project", "project must be an object", { example: { goal: "update tax", mode: "lock", tasks: [] } })];
   if (!text(project.goal).trim()) f.push(finding("P0", "RUN_GOAL", "input.project.goal", "goal is required", { example: "update tax rate" }));
-  if (!MODES.has(text(project.mode))) f.push(finding("P0", "RUN_MODE", "input.project.mode", "mode must be lock, probe, or swarm", { example: "lock" }));
-  const parsed = readContract({ contract: project.contract });
-  if (parsed.findings) f.push(...parsed.findings);
+  const mode = text(project.mode);
+  if (!MODES.has(mode)) f.push(finding("P0", "RUN_MODE", "input.project.mode", "mode must be bypass, lock, probe, or swarm", { example: "lock" }));
   if (!Array.isArray(project.tasks)) f.push(finding("P0", "RUN_TASKS", "input.project.tasks", "tasks must be an array", { example: [{ path: "src/tax.ts" }] }));
+  if (mode === "bypass") {
+    const activeFields = Object.keys(project).filter((key) => !["goal", "mode", "tasks"].includes(key));
+    if (activeFields.length || (Array.isArray(project.tasks) && project.tasks.length > 0)) {
+      f.push(finding("P0", "BYPASS_ACTIVE_ARTIFACT", "input.project", "bypass must not contain a contract, tasks, snapshots, or active-chain artifacts", { example: { goal: "small edit", mode: "bypass", tasks: [] } }));
+    }
+  } else if (MODES.has(mode)) {
+    const parsed = readContract({ contract: project.contract });
+    if (parsed.findings) f.push(...parsed.findings);
+  }
   return f;
 }
 
 function validateRequest(request) {
   const f = [];
-  if (!isObject(request)) return [finding("P0", "REQUEST_OBJECT", "request", "request must be an object", { example: { schemaVersion: "aimlock.skill.request/1.0", requestId: "req-1", operation: "capabilities" } })];
-  if (request.schemaVersion !== REQUEST_SCHEMA) f.push(finding("P0", "REQUEST_SCHEMA", "request.schemaVersion", `Expected ${REQUEST_SCHEMA}`, { example: REQUEST_SCHEMA }));
+  if (!isObject(request)) return [finding("P0", "REQUEST_OBJECT", "request", "request must be an object", { example: { schemaVersion: REQUEST_SCHEMA, requestId: "req-1", operation: "capabilities" } })];
+  if (![LEGACY_REQUEST_SCHEMA, REQUEST_SCHEMA].includes(request.schemaVersion)) f.push(finding("P0", "REQUEST_SCHEMA", "request.schemaVersion", `Expected ${LEGACY_REQUEST_SCHEMA} or ${REQUEST_SCHEMA}`, { example: REQUEST_SCHEMA }));
   if (!text(request.requestId)) f.push(finding("P0", "REQUEST_REQUIRED_FIELD", "request.requestId", "requestId is required", { example: "req-1" }));
   if (!text(request.operation)) f.push(finding("P0", "REQUEST_REQUIRED_FIELD", "request.operation", "operation is required", { example: "capabilities" }));
   return f;
 }
 
+function legacyCompatibleInput(operation, input) {
+  if (operation === "classify") {
+    return { ...input, risk: input.risk ?? "medium", explicitAimlockRequested: input.explicitAimlockRequested ?? false };
+  }
+  if (operation === "skill-route") {
+    return {
+      ...input,
+      contractUnclear: input.contractUnclear ?? input.hasBlueprint === false,
+      hasArchitectureContract: input.hasArchitectureContract ?? false,
+      newProject: input.newProject ?? false,
+      requiresConfirmation: input.requiresConfirmation ?? false,
+    };
+  }
+  return input;
+}
+
 function handleClassify(requestId, input) {
+  const declaredRisk = requireChoice(input, "risk", RISKS);
+  if (declaredRisk.error) return blockedResponse(requestId, [declaredRisk.error]);
   // 第一层：确定性规则分类（产物类型/风险/链路）
-  const demand = classifyDemand(input);
+  const demand = classifyDemand({ ...input, risk: declaredRisk.value });
   if (demand.findings) return blockedResponse(requestId, demand.findings);
   // 如果规则未命中，返回追问
   if (demand.source === "needs-clarification") {
     return okResponse(requestId, { ...demand, nextStep: { operation: "classify", instruction: "Answer the clarification question, then re-classify." } });
   }
-  // 规则命中 → 同时走原有 lock/probe/swarm 分档
-  const result = classifyMode(input);
+  const result = classifyMode({ ...input, risk: demand.risk });
   if (result.findings) return blockedResponse(requestId, result.findings);
   return okResponse(requestId, {
     ...result,
     product: demand.product, risk: demand.risk, chain: demand.chain, confidence: demand.confidence, classificationSource: demand.source,
-    nextStep: demand.chain === "chat" ? { operation: null, instruction: "Pure chat; no chain needed." }
-      : demand.chain === "probe-only" ? { operation: "scope-contract", instruction: "Read-only probe; write scope contract then analyze." }
-      : { operation: "chain-plan", instruction: "Generate the execution chain plan for this demand." },
+    nextStep: result.mode === "bypass"
+      ? { operation: "skill-route", instruction: "Resolve at most one specialist skill; do not start the Aimlock chain." }
+      : demand.chain === "chat" ? { operation: null, instruction: "Pure chat; no chain needed." }
+        : { operation: "scope-contract", instruction: "Lock the active Aimlock scope before routing." },
   });
 }
 
@@ -1046,7 +1116,16 @@ function handleContract(requestId, input) {
 function handleRoute(requestId, input) {
   const routed = routeSkills(input);
   if (routed.findings) return blockedResponse(requestId, routed.findings);
-  return okResponse(requestId, { hops: routed.hops, nextStep: { operation: "propose-nodes", instruction: "Workers return modification nodes read-only. Do not mutate yet." } });
+  if (routed.mode === "bypass") {
+    return okResponse(requestId, { useAimlock: false, recommendedSkills: routed.hops,
+      nextStep: { operation: null, instruction: "Handle directly or invoke only the returned specialist." } });
+  }
+  if (routed.hops.length === 0) {
+    return okResponse(requestId, { hops: [],
+      nextStep: { operation: "propose-nodes", instruction: "No specialist is needed; return modification nodes read-only." } });
+  }
+  return okResponse(requestId, { hops: routed.hops,
+    nextStep: { operation: "chain-plan", instruction: "Plan only the returned server-resolved skill ids." } });
 }
 function handlePropose(requestId, input) {
   const result = validateNodes(input);
@@ -1087,23 +1166,40 @@ function handleContinuity(requestId, input) {
 }
 
 function snapshotVerify(input) {
-  const sid = requireText(input, "snapshotId");
+  const sid = requireSnapshotIdentifier(input, "snapshotId");
   if (sid.error) return { findings: [sid.error] };
+  const binding = snapshotBinding(input);
+  if (binding.findings) return binding;
   const files = input?.files;
   if (!Array.isArray(files) || files.length === 0) return { findings: [finding("P0", "VERIFY_FILES", "input.files", "files must be a non-empty array", { example: [{ path: "src/tax.ts", sourceHash: "a".repeat(64), snapshotHash: "a".repeat(64) }] })] };
   const findings = [];
+  const normalizedFiles = [];
   for (const [i, f] of files.entries()) {
     const ref = `input.files[${i}]`;
-    if (!isObject(f) || !text(f.path).trim()) {
+    const normalizedPath = isObject(f) ? safeRelativePath(f.path) : null;
+    if (!isObject(f) || normalizedPath === null) {
       findings.push(finding("P0", "VERIFY_FILE_OBJECT", ref, "each file must have a non-empty path", { example: { path: "src/tax.ts", sourceHash: "a".repeat(64), snapshotHash: "a".repeat(64) } }));
       continue;
     }
     if (!SHA256_PATTERN.test(f.sourceHash)) findings.push(finding("P0", "VERIFY_SOURCE_HASH", `${ref}.sourceHash`, "sourceHash must be a lowercase SHA-256 digest", { example: "a".repeat(64) }));
     if (!SHA256_PATTERN.test(f.snapshotHash)) findings.push(finding("P0", "VERIFY_SNAPSHOT_HASH", `${ref}.snapshotHash`, "snapshotHash must be a lowercase SHA-256 digest", { example: "a".repeat(64) }));
     if (SHA256_PATTERN.test(f.sourceHash) && SHA256_PATTERN.test(f.snapshotHash) && f.sourceHash !== f.snapshotHash) findings.push(finding("P0", "SNAPSHOT_HASH_MISMATCH", ref, `${f.path} differs from its snapshot copy`, { example: { sourceHash: f.sourceHash, snapshotHash: f.sourceHash } }));
+    if (SHA256_PATTERN.test(f.sourceHash) && SHA256_PATTERN.test(f.snapshotHash)) {
+      normalizedFiles.push({ path: normalizedPath, sourceHash: f.sourceHash, snapshotHash: f.snapshotHash });
+    }
+  }
+  normalizedFiles.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  if (normalizedFiles.map((file) => file.path).join("\n") !== binding.paths.join("\n")) {
+    findings.push(finding("P0", "SNAPSHOT_PATH_SET", "input.files", "snapshot files must exactly match the accepted node paths", { example: binding.paths }));
   }
   if (findings.length) return { findings };
-  return { verified: true, snapshotId: sid.value, fileCount: files.length };
+  const core = {
+    schemaVersion: SNAPSHOT_RECEIPT_SCHEMA, snapshotId: sid.value,
+    contractDigest: binding.contractDigest, nodeDigest: binding.nodeDigest,
+    pathDigest: binding.pathDigest, fileManifestDigest: digest(normalizedFiles),
+  };
+  return { verified: true, snapshotId: sid.value, fileCount: files.length,
+    receipt: { ...core, paths: binding.paths, receiptDigest: digest(core) } };
 }
 function runStatus(input) {
   const rid = requireText(input, "runId");
@@ -1124,22 +1220,31 @@ function finish(requestId, result, payload) {
   return okResponse(requestId, payload ?? result);
 }
 
-export async function run(request) {
+async function executeRun(request) {
   const requestFindings = validateRequest(request);
   if (requestFindings.length) {
     return { ...blockedResponse(request?.requestId ?? "unknown", requestFindings), errorSchema: ERROR_SCHEMA };
   }
   const { requestId, operation } = request;
-  const input = isObject(request.input) ? request.input : {};
+  const rawInput = isObject(request.input) ? request.input : {};
+  const input = request.schemaVersion === LEGACY_REQUEST_SCHEMA
+    ? legacyCompatibleInput(operation, rawInput) : rawInput;
   if (operation === "capabilities") {
     return okResponse(requestId, {
       capabilities: {
         pure: true, stateless: true, networkRequired: false, filesystemRequired: false,
         operations: [...PURE_OPERATIONS], operationSchemas: OPERATION_SCHEMAS,
-        modes: ["lock", "probe", "swarm"], forbidGitBranch: true,
+        modes: ["bypass", "lock", "probe", "swarm"], forbidGitBranch: true,
         keepAliveSeconds: KEEP_ALIVE_SECONDS, keepAliveMessage: KEEP_ALIVE_MESSAGE,
-        defaultAllowlist: "official", userSpecifiedField: "userSpecifiedSkills", catalogSchema: CATALOG_SCHEMA,
-        registryVersion: REGISTRY_VERSION, registry: SKILL_REGISTRY,
+        routing: "server-resolved-on-demand", userSpecifiedField: "userSpecifiedSkills",
+        localTrustedExecution: {
+          requiredFor: ["filesystem-probe", "read-budget", "mutate-pass", "guarded-write", "autocoord-lease"],
+          operations: ["capabilities", "probe", "reassess", "budget-init", "budget-read", "budget-status",
+            "budget-extend", "gate-issue", "gate-verify", "guarded-write"],
+          command: "cli-aimlock local <operation> <repositoryRoot>",
+          schemaDiscovery: "cli-aimlock local capabilities <repositoryRoot>",
+          boundary: "Only host writes routed through guarded-write are physically intercepted.",
+        },
       },
       skill: { name: COMPILER_NAME, version: COMPILER_VERSION },
       firstUseNotice: FIRST_USE_NOTICE,
@@ -1169,9 +1274,9 @@ export async function run(request) {
       const missing = [...requiredIds].filter((id) => !providedIds.has(id));
       if (missing.length) return blockedResponse(requestId, [finding("P0", "INTAKE_MISSING", "input.answers", `missing required answers: ${missing.join(", ")}`, { example: INTAKE_QUESTIONS.map((q) => ({ id: q.id, answer: q.example })) })]);
       const answerMap = Object.fromEntries(normalized.filter((a) => a.id).map((a) => [a.id, a.answer]));
-      return okResponse(requestId, { answers: answerMap, nextStep: { operation: "classify", instruction: "Classify lock/probe/swarm from the answers. Do not mutate yet." } });
+      return okResponse(requestId, { answers: answerMap, nextStep: { operation: "classify", instruction: "Classify bypass/lock/probe/swarm from the answers. Do not mutate yet." } });
     }
-    return okResponse(requestId, { questions: INTAKE_QUESTIONS, nextStep: { operation: "classify", instruction: "Classify lock/probe/swarm from the answers. Do not mutate yet." } });
+    return okResponse(requestId, { questions: INTAKE_QUESTIONS, nextStep: { operation: "classify", instruction: "Classify bypass/lock/probe/swarm from the answers. Do not mutate yet." } });
   }
   if (operation === "classify") return handleClassify(requestId, input);
   if (operation === "scope-contract") return handleContract(requestId, input);
@@ -1192,7 +1297,6 @@ export async function run(request) {
     return okResponse(requestId, { ...result, nextStep: result.ready.length ? { operation: result.ready[0], instruction: `Execute first ready step: ${result.ready[0]}` } : { operation: "chain-status", instruction: "All steps blocked or complete." } });
   }
   if (operation === "chain-status") return finish(requestId, chainStatus(input));
-  if (operation === "registry-register") return finish(requestId, registerSkill(input));
   if (operation === "feedback") return finish(requestId, submitFeedback(input));
   if (operation === "validate-json") {
     const findings = validateRunJson(input.project);
@@ -1202,9 +1306,17 @@ export async function run(request) {
   return failed(requestId, "UNSUPPORTED_OPERATION", `Unsupported operation: ${operation}`);
 }
 
+export async function run(request) {
+  const result = await executeRun(request);
+  if (isObject(request) && request.schemaVersion === LEGACY_REQUEST_SCHEMA && isObject(result)) {
+    return { ...result, schemaVersion: LEGACY_RESPONSE_SCHEMA };
+  }
+  return result;
+}
+
 export {
   COMPILER_VERSION, CONTRACT_SCHEMA, PURE_OPERATIONS, OPERATION_CATALOG, INTAKE_QUESTIONS, OPERATION_SCHEMAS,
-  CATALOG_SCHEMA, KEEP_ALIVE_SECONDS, KEEP_ALIVE_MESSAGE, FIRST_USE_NOTICE,
-  classifyMode, readContract, validateNodes, routeSkills, matchCatalogHops, snapshotPlan, mutateGate,
+  KEEP_ALIVE_SECONDS, KEEP_ALIVE_MESSAGE, FIRST_USE_NOTICE, BYPASS_NOTICE,
+  classifyMode, readContract, validateNodes, routeSkills, snapshotPlan, mutateGate,
   continuity, interrupt, keepAlive, deliveryDoc, validateRunJson, snapshotVerify, runStatus, okResponse, blockedResponse, finding,
 };

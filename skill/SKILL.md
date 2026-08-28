@@ -1,26 +1,55 @@
 ---
 name: aimlock
-description: "Aimlock 把用户需求锁成可执行的智能目标，阻止思考漂移、执行漂移和范围膨胀。主智能体先读本规范，禁止立刻改代码：先拆 JSON 任务，按范围合同分成 Lock / Probe / Swarm。Lock 档单文件小改由主脑快照后改写；Probe 档只读分析修改节点，确认后再写；Swarm 档才调用蜂群。Blueprint 编规划合同，Swarm 派单执行，Calctool 生成计算工具。改前文件快照，禁止创建 git 分支。插话先判关联再更新任务；强制停止立即停止。目标未完成交出控制权时每 90 秒发送「智能目标持续执行中，请勿关闭！」。交付文档需用户确认。调用前必须 capabilities，再按 nextStep 前进。Locks a user request into an executable aim to stop thought-drift, execution-drift, and scope blow-ups. Read this skill first; do not edit code yet. Split JSON tasks; classify Lock / Probe / Swarm. Blueprint for contracts, Swarm for dispatch, Calctool for calculators. Snapshot files before mutate; never create git branches. Interrupt: correlate first. Keep-alive every 90s while the aim is open. Delivery docs only if the user confirms. Always call capabilities first. Фиксирует запрос в исполняемую цель, чтобы остановить дрейф мысли, дрейф исполнения и раздувание объёма. Сначала эта спецификация, код не трогать. JSON-задачи, режимы Lock / Probe / Swarm. Blueprint — контракт, Swarm — раздача, Calctool — калькулятор. Снимок файлов до правки, без git-веток. Сначала capabilities."
+description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要并行协作或用户明确要求的工程修改，负责锁定目标、范围、快照和写入门禁。低难度、预计不超过 500 行、非跨模块、非高风险、不并行且未明确要求 Aimlock 的需求不要启动完整链；应直接处理或只调用一个匹配的专项技能。Use Aimlock only for large, deep, cross-module, high-risk, parallel, or explicitly requested engineering changes. Bypass low-difficulty work of at most 500 estimated lines only when it is not cross-module, high-risk, parallel, or explicitly assigned to Aimlock; handle it directly or use one matched specialist. Используйте Aimlock только для крупных, сложных, межмодульных, рискованных, параллельных или явно назначенных инженерных изменений. Простую задачу до 500 строк обходите только без межмодульности, высокого риска, параллели и явного требования Aimlock; выполните её напрямую либо одним профильным навыком."
 ---
 
 # Aimlock Skill
 
-Package version: v7.0.19
+Package version: v7.0.25
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
-Request schema: aimlock.skill.request/1.0
-Response schema: aimlock.skill.response/1.0
 
-Aimlock is a policy layer. It does not replace Blueprint, Swarm, or Calctool. Aimlock decides **when to fire, how wide, and how to stop drift**.
+Request schema: `aimlock.skill.request/1.1`（运行时继续接受 `1.0` 存量客户端）
+
+Response schema: `aimlock.skill.response/1.1`（`1.0` 请求返回 `1.0` 响应）
+
+Aimlock is a high-overhead policy gate for substantial engineering work. It does not replace a specialist skill and must not turn a small change into a full workflow.
+
+## Applicability gate
+
+Apply this gate before calling `capabilities`.
+
+Return `bypass` when every condition is true:
+
+- `difficulty` is `low`;
+- `estimatedChangedLines` is at most `500`;
+- `crossModule` is `false`;
+- risk is not `high`;
+- `needParallel` is `false`;
+- `explicitAimlockRequested` is `false`.
+
+When bypassed, do not start intake, scope contracts, snapshots, workers, keep-alive, or a full chain. Tell the user:
+
+`需求较小且低风险，不建议使用 Aimlock；请直接处理，或只调用一个匹配的专项技能。`
+
+The CLI `run` command derives applicability from real target paths, recent Git diff sizes, package boundaries, and the local import graph. Caller-supplied estimates cannot override this probe. Ambiguous work starts in the smaller mode and upgrades one level at a time while preserving its snapshot and completed changes. A bypass performs no skill HTTP call, creates no automatic evaluation, and writes no requirements file.
+
+At most one specialist may be recommended. A normal small code change needs no skill. A calculator request may use Calctool alone; a typed approval may use Confirm Protocol alone.
+
+Activate Aimlock when any condition is true: difficulty is medium/high, more than 500 lines are expected, the work crosses modules, risk is high, parallel work is required, or the user explicitly requests Aimlock for the change.
+
+English: bypass small low-difficulty work and use at most one matching specialist.
+
+Русский: небольшую простую задачу обходите без Aimlock; допускается не более одного профильного навыка.
 
 ## Request envelope
 
-POST JSON to the endpoint with an `input` wrapper:
+POST JSON with an `input` wrapper:
 
 ```json
 {
   "input": {
-    "schemaVersion": "aimlock.skill.request/1.0",
+    "schemaVersion": "aimlock.skill.request/1.1",
     "requestId": "<unique-id>",
     "operation": "<operation>",
     "input": {}
@@ -28,85 +57,71 @@ POST JSON to the endpoint with an `input` wrapper:
 }
 ```
 
+## Active Aimlock flow
+
+Only after the applicability gate activates Aimlock:
+
+1. Call local `capabilities`, then `probe`; use only its filesystem, Git-history, package-boundary, and import-graph facts for the initial mode. Exact `targetSymbols` may resolve through a fresh ContextBase map; missing, ambiguous, or stale map entries block.
+2. Call remote `capabilities`, `intake`, and `classify`. A fallback `bypass` response stops the Aimlock chain.
+3. Call `scope-contract`; empty allowed paths are blocked. Initialize the mode's local read budget before exploration.
+4. Route every source read through local `budget-read`. Exhaustion requires `execute`, `plan`, or `blocked`; only a low-risk Confirm Protocol receipt may extend it.
+5. Call `skill-route`. The server queries the current published official directory and injects only matched skills.
+6. For Probe or Swarm, workers inspect read-only and return modification nodes. Lock stays on the current agent.
+7. Call `propose-nodes`, `accept-nodes`, `snapshot-plan`, and `snapshot-verify` in order.
+8. Issue a local signed mutation pass after `mutate-gate` permits the verified snapshot. Route each batch write through local `guarded-write` with the same chainId and pass.
+9. If actual files or changed lines exceed the contract budget, call local `reassess`; upgrade only one level and preserve the current snapshot, changes, and evidence. Tell the user when this occurs.
+10. Call `continuity-check` with real TestEvidence. Yellow or red means restore the copied snapshot.
+11. Use `keep-alive` only while an active Aimlock goal is incomplete.
+
+Never create a git branch or worktree. File-copy snapshots are the only isolation method.
+
+For an active demand, `Lock` covers one file through 500 estimated changed lines and `Probe` covers at most three files through 500 estimated changed lines. More than three target files, more than 500 lines, cross-module work, or required parallel work routes to `Swarm`; difficulty and risk still decide whether Aimlock activates at all.
+
+## On-demand specialist routing
+
+Aimlock contains no static full-skill registry. `capabilities` does not preload the official catalog. `skill-route` is resolved by the CLI.Tax server from the current published directory, and the result contains matched skills only.
+
+Required routing facts include `mode`, `goalKind`, `risk`, `contractUnclear`, blueprint/architecture state, and explicit booleans for confirmation, calculator, merge, and final validation needs.
+
+- Calctool: only for a calculator demand or explicit calculation requirement. It must not appear in a non-calculation result.
+- Confirm Protocol: only when a structured user decision is required.
+- ArchGuard: only for code/mixed work in a new project or under an existing architecture contract.
+- Blueprint: only for active Probe/Swarm work when `contractUnclear=true` and no blueprint exists.
+- Swarm: only for active Swarm mode.
+- Validator: only for high-risk work or an explicit final-validation requirement.
+- MergeGuard: only for an explicit verified-merge requirement.
+- User-named extras are analysis candidates until their own `capabilities` prove a match.
+
+Caller-supplied full catalogs and local registry flags are forbidden. `serverResolvedSkills` is overwritten by the server; missing server resolution is blocked. Bypass routing returns no more than one recommendation and never constructs a chain.
+
 ## Operations
 
-- `capabilities`: modes, sibling skills, keep-alive text, first-use notice.
-- `help`: operation catalog.
-- `intake`: return required questions or validate a batch of `{id, answer}` values.
-- `classify`: choose `lock` | `probe` | `swarm` from explicit facts. Missing facts → `blocked`.
-- `scope-contract`: allowed paths, forbidden paths, max changed lines, new-file / delete flags.
-- `skill-route`: whether to call Blueprint, Swarm, Calctool.
-- `propose-nodes`: validate read-only modification nodes against the contract.
-- `accept-nodes`: auto-accept in-scope nodes; escalate worker conflicts.
-- `snapshot-plan`: file-copy snapshot. Git branches and worktrees are forbidden.
-- `snapshot-verify`: compare caller-computed SHA-256 hashes for every source/snapshot pair.
-- `mutate-gate`: mutate only after acceptance and successful snapshot verification.
-- `continuity-check`: traffic-light budget, structured TestEvidence, and omission scan.
-- `interrupt`: `status` | `fuse` | `spawn` | `stop`.
-- `keep-alive`: return the exact 90s protocol message; the caller owns the timer.
-- `run-status`: validate caller-supplied run state; without state the result is explicitly unknown.
-- `delivery-doc`: write a summary only if the user confirmed.
-- `validate-json`: validate an Aimlock run JSON.
-- `chain-plan`: generate the execution chain for this demand from `chain` + `risk` (Router).
-- `chain-status`: report the current step and completion of an active chain.
-- `registry-register`: register a skill hop (whenToCall / whenNotToCall / prerequisites / chainPosition) into the Router registry.
-- `feedback`: record a routing decision for rule-table refinement (fromSkill → toSkill + reason).
+- `capabilities`, `help`, `intake`, `classify`
+- `scope-contract`, `skill-route`
+- `propose-nodes`, `accept-nodes`
+- `snapshot-plan`, `snapshot-verify`, `mutate-gate`
+- `continuity-check`, `interrupt`, `keep-alive`
+- `run-status`, `chain-plan`, `chain-status`
+- `delivery-doc`, `validate-json`, `feedback`
 
-## Required flow
+Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-read`, `budget-status`, `budget-extend`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
 
-1. Call `capabilities`. On first use in the conversation, show `firstUseNotice` once.
-2. Call `intake`; collect every **required** answer and submit them as a batch. Do not mutate files.
-3. Call `classify` with the answers. Do not invent file lists or line budgets.
-4. Call `scope-contract`. Empty `allowedPaths` is `blocked`.
-5. Call `skill-route` with `mode`, `goalKind`, `hasBlueprint`, `hasArchitectureContract`, `newProject`, and `useRegistry: true`. Use the built-in Router before considering any user-named extension. Existing projects without a contract continue without blocking and receive a contract-create recommendation; new projects create the ArchGuard contract before Blueprint.
-6. **Probe / Swarm:** workers read code only and return nodes. Call `propose-nodes` then `accept-nodes`.
-7. **Lock:** the main agent still snapshots, then mutates inside the contract. No swarm.
-8. Call `snapshot-plan`. Copy files into `snapshotRoot`. Never `git branch` / `git checkout -b` / worktree.
-9. Compute SHA-256 for every original and copied file, then call `snapshot-verify`. A mismatch is `blocked`.
-10. Call `mutate-gate` with `snapshotVerified: true`. If `blocked`, do not write.
-11. After writes, call `continuity-check` with TestEvidence. Red or yellow → roll back from the snapshot.
-12. Before yielding while the aim is open, call `keep-alive` with `goalComplete: false`; schedule and send its message in the caller.
-13. Reclaim temporary agents after green. Ask about `delivery-doc` only if intake said the user wants it.
+`chain-plan` accepts only server-resolved skill IDs. High-risk work is blocked if Validator was not resolved. When `swarm` is present, it inserts the internal `coordinator.conflict-scan` step immediately before it; no unrelated external skill is added.
 
-### Classify rules (deterministic)
+## Interrupt and keep-alive
 
-Facts required: `goal`, `targetFiles` (string array), `estimatedChangedLines`, `crossModule`, `needParallel`.
+Call `interrupt` before acting on an interruption:
 
-- **lock**: exactly one file, ≤ 20 lines, not cross-module, not parallel.
-- **probe**: ≤ 3 files, ≤ 80 lines, not parallel.
-- **swarm**: otherwise.
+- forced stop → `stop`;
+- status query → `status`;
+- related addition → `fuse`;
+- unrelated request → `spawn`.
 
-### Skill routing
-
-Default allowlist is **official skills**. The normal path is `skill-route` with `useRegistry: true`; the caller does not need to echo a catalog. Passing a complete `officialCatalog` remains a compatibility path.
-
-Call a hop only when `call` is true. That means the hop's capability matches this demand and the current chain allows it.
-
-**Router mode (recommended):** pass `useRegistry: true` (or `registryVersion`) to `skill-route`; Aimlock answers hops from its built-in `SKILL_REGISTRY` (blueprint / swarm / calctool / mergeguard / validator), no catalog round-trip needed. For a full execution chain, call `chain-plan` with `chain` (`code-risky` | `calculator` | `page-new` | `merge` | `probe-only` | `chat`) and `risk`; it returns the ordered step list and the first `ready` step. High-risk demands must include `validator` — skipping it is blocked. Track progress with `chain-status` (chainId + steps + completed).
-
-- Do not call chain-unrelated skills.
-- Do not call self-extended or marketplace extras.
-- Extra skills enter the candidate list only when the user names them (`userSpecifiedSkills`). Then call that skill's `capabilities` and invoke only if its capability matches the demand.
-- New skills are added to the registry via `registry-register`; routing misses are reported via `feedback`.
-
-Do not call Calctool unless the aim is a calculator tool.
-
-### Interrupt
-
-Call `interrupt` with `forceStop`, `isStatusQuery`, `related` as booleans. Do not execute a new request first.
-
-- `stop`: user forced stop.
-- `status`: report only.
-- `fuse`: related; signal the running agent; update JSON; continue.
-- `spawn`: unrelated; new temporary agent; do not hijack the current aim.
-
-### Keep-alive
-
-When the aim is incomplete and the IDE is about to yield, send exactly:
+For an active incomplete goal, the caller sends exactly every 90 seconds:
 
 `智能目标持续执行中，请勿关闭！`
 
-Interval: 90 seconds. Aimlock is stateless: `armed` remains false and `callerTimerRequired` tells the IDE whether it must schedule the message. Do not claim that the operation started a timer. When `goalComplete` is true, no timer is required.
+Aimlock returns the protocol; it does not start a timer.
 
 ## 实现状态
 
@@ -114,42 +129,34 @@ Interval: 90 seconds. Aimlock is stateless: `armed` remains false and `callerTim
 |---|---|---|---|
 | A1 | 90 秒保活协议 | 已实现 | 返回固定消息和间隔；定时器由调用方负责，运行时不会自行推送。 |
 | A2 | 运行状态查询 | 已实现（无持久化） | 仅验证调用方传入的状态；未传状态时明确返回 `known: false`。 |
-| A3 | Router 统一路由 | 已实现 | 内置官方技能注册表；用户点名的扩展仍需单独能力确认。 |
-| A4 | 快照写入门禁 | 已实现 | 运行时比较调用方计算的 SHA-256；不读取文件系统，`mutate-gate` 强制要求验证结果。 |
+| A3 | 官方技能按需路由 | 已实现 | 服务端读取当前已发布官方目录，只注入与需求匹配的技能；不加载完整目录。 |
+| A4 | 快照写入门禁 | 已实现（需宿主路由） | 本地运行器重读真实文件副本并签发 Ed25519 短期凭证；凭证绑定 chainId、快照摘要和路径。只有经过 `guarded-write` 的写入能被物理拦截，IDE 宿主必须关闭旁路批量写入口。 |
+| A5 | 真实分档与逐级升级 | 已实现 | 本地读取真实路径、Git 历史、包边界和 import 图；可从新鲜 ContextBase 地图解析精确目标符号；调用方自报复杂度不能覆盖探测，升级继承现有证据。 |
+| A6 | 读取预算与截止 | 已实现（需宿主路由） | Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/15 分钟；Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额。 |
+| A7 | AutoCoord 物理联锁 | 已实现（需宿主路由） | `gate-issue` 显式选择是否需要协调；协调凭证绑定 Swarm 签名文件租约，`guarded-write` 在同一临界区校验凭证、活动锁和路径范围。活动依赖等待会阻断预算读取。 |
 
-## Safety rules
+## Safety
 
-- Never create a git branch. Isolation is a file-copy snapshot plus a temporary agent context.
-- Never mutate before `snapshot-verify` succeeds and `mutate-gate` returns `allowed: true`.
-- Never treat missing files, timeouts, or 4xx/5xx as empty success. `blocked` and `failed` are errors.
-- Never send credentials in the envelope.
-- The response `status` must be `succeeded`; `blocked` and `failed` are not results.
-- Do not expand 1 line into 100. Over-budget is red; roll back.
-- Delivery documents are optional. Skip unless the user confirmed.
+- Never mutate before accepted nodes and verified file-copy snapshots.
+- Never claim global write interception unless the IDE host routes every batch write through `guarded-write`; the package cannot intercept unrelated operating-system writes by itself.
+- Never read source outside `budget-read` after a budget is initialized. Estimated tokens use the documented UTF-8-bytes/4 ceiling and are not an exact tokenizer count.
+- Never issue a coordinated pass without a current signed `.coord` file lease. Never read while the same chain has an active `dependency-wait`.
+- Never treat missing server routing, files, timeouts, or HTTP errors as empty success.
+- Never send credentials in the request envelope.
+- Aimlock never grants blanket disk, network, account, or operating-system access. The caller must request only the exact resource and action needed, prefer file/directory pickers and read-only or time-bounded grants, and revoke the grant after the task. If an integration only works with full access, stop and require a least-privilege adapter instead of bypassing the operating-system permission model.
+- `blocked` and `failed` are not successful results.
+- Delivery documents are optional and require explicit user confirmation.
+- Do not expand a small request merely to justify Aimlock.
 
-## Examples
+## 受限调用与自动评价闭环
 
-### Lock: one-line constant
+- IDE / 智能体必须通过本包 `invoke` 或 JSON-stdin `broker` 调用，不得直接拼装技能 HTTP 请求，也不得读取 BrainClient token。
+- broker 从 `CLITAX_BRAIN_CLIENT_TOKEN_FILE` 读取身份；macOS/Linux 文件必须为当前 broker 账户所有且权限 `0600`，Windows 文件必须位于受限 `%LOCALAPPDATA%\CLI.Tax\broker` 目录。
+- broker 只需要 Brain Client HTTPS、受限身份文件和调用方显式传入的路径，本身不需要完整磁盘访问。若要保证 IDE 无法读取身份文件，必须把 broker 放进独立低权限系统账户或沙箱服务，并只暴露受限 IPC；broker 与 IDE 同账户运行时，`0600` 不能隔离二者，禁止声称令牌已隔离。
+- broker 只用 `Authorization: BrainClient …` 发起一次 runtime 请求。HTTP 成功后必须保留响应顶层原始 `feedbackReceiptId`、`feedbackInvocationId` 和 `feedbackEvaluation.digest`，不得生成、猜测、复用或跨调用转移。
+- Brain Client 服务端必须严格绑定请求/响应的 `requestId` 和 `schemaVersion`，再根据真实状态、验证结果、服务端耗时与 findings 生成并持久化权威评分、评语和摘要。broker 不得生成分数或评语。
+- 同一次 runtime 请求在服务端事务内生成并持久化评价，再返回 `feedbackReceiptId`、`feedbackInvocationId` 和权威摘要；broker 只验证已提交回执，不发起第二次评价写入。`not-reported`、验证不完整、P0/P1 findings、`blocked` 或 `failed` 都不得生成好评。
+- 缺少凭证或 ID、身份不匹配、摘要不匹配、响应非法以及任何 HTTP 失败都必须显式失败，不得静默、不重试成重复评价。
+- 本地 CLI 不提供手工评分或评语提交命令，人类不得选择技能分数或填写技能评价；日常聊天不属于评价协议。
 
-User: 只改税率常量一行.
-
-`classify` → `lock`. Snapshot that file. Change the one line. `continuity-check` must stay within `maxChangedLines`.
-
-### Probe then mutate
-
-User: 修支付回调的状态机，可能有上下游.
-
-`classify` → `probe`. Worker returns nodes. If a node points outside `allowedPaths`, `propose-nodes` is `blocked`. After accept + snapshot, mutate.
-
-## 反馈通道
-
-评价只能由 IDE / 智能体自动回传，严禁人类干预：
-
-1. 仅当一次真实技能 HTTP 调用成功，并且响应顶层包含 `feedbackInvocationId` 时，调用方才可进入评价流程。
-2. 调用方必须使用本次响应的原始 ID，按真实执行结果生成整数分数（0–100）和真实评语，再自动执行：
-   `npx cli-aimlock@latest feedback <feedbackInvocationId> <score> <comment...>`
-3. 自动回传必须使用会员中心 Brain 客户端生成的同一身份文件，并通过 `CLITAX_BRAIN_CLIENT_TOKEN_FILE` 指向该 `0600` 文件；服务端以会员账号实名入库，不接受匿名评价。
-4. 禁止伪造、猜测、复用或跨调用转移 `feedbackInvocationId`；禁止让人类选择分数、填写评价或代为执行命令。
-5. 缺少会员客户端身份或 ID、分数越界、空评语、响应不合法及任何 HTTP 失败都必须视为回传失败，不得记为成功。
-
-日常交流走技能详情页的独立聊天通道，不使用 `feedback` 命令，也不计入评价、评分或首页跑马灯。
+调用示例：`npx cli-aimlock@latest invoke <operation> '<JSON对象>'`。IDE 集成可向 `npx cli-aimlock@latest broker` 的 stdin 发送 `{"operation":"capabilities","input":{}}`。

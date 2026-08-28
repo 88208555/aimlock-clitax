@@ -2,10 +2,17 @@
   "bin": {
     "cli-aimlock": "./cli.mjs"
   },
-  "description": "Aimlock skill installer for CLI.Tax: lock a user request into an executable aim and route Blueprint, Swarm, and Calctool.",
+  "description": "Aimlock installer: locally bypass small low-risk work, or lock large, deep, cross-module, high-risk, parallel, and explicitly requested changes into an executable aim.",
   "files": [
     "cli.mjs",
+    "aimlock-local-fs.mjs",
+    "aimlock-context-map.mjs",
+    "aimlock-coordination.mjs",
+    "aimlock-local-gate.mjs",
+    "aimlock-local-runner.mjs",
+    "aimlock-runtime.mjs",
     "installer.mjs",
+    "broker.mjs",
     "README.md",
     "skill/SKILL.md",
     "skill/skill.json"
@@ -13,10 +20,18 @@
   "license": "UNLICENSED",
   "name": "cli-aimlock",
   "private": false,
+  "dependencies": {
+    "cli-swarm": "workspace:*"
+  },
+  "exports": {
+    "./coordination": "./aimlock-coordination.mjs",
+    "./local-runner": "./aimlock-local-runner.mjs",
+    "./runtime": "./aimlock-runtime.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/88208555/aimlock-clitax.git"
   },
   "type": "module",
-  "version": "7.0.19"
+  "version": "7.0.25"
 }
