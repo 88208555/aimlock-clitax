@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.30
+Package version: v7.0.31
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -84,7 +84,7 @@ Aimlock contains no static full-skill registry. `capabilities` does not preload 
 Required routing facts include `mode`, `goalKind`, `risk`, `contractUnclear`, blueprint/architecture state, and explicit booleans for confirmation, calculator, merge, and final validation needs.
 
 - Calctool: only for a calculator demand or explicit calculation requirement. It must not appear in a non-calculation result.
-- Confirm Protocol: only when a structured user decision is required.
+- Confirm Protocol: when a structured user decision is required, and always for high-risk work even if the caller sends a false hint.
 - ArchGuard: only for code/mixed work in a new project or under an existing architecture contract.
 - Blueprint: only for active Probe/Swarm work when `contractUnclear=true` and no blueprint exists.
 - Swarm: only for active Swarm mode.
@@ -106,7 +106,7 @@ Caller-supplied full catalogs and local registry flags are forbidden. `serverRes
 
 Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-read`, `budget-status`, `budget-extend`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
 
-`chain-plan` accepts only server-resolved skill IDs. High-risk work is blocked if Validator was not resolved. When `swarm` is present, it inserts the internal `coordinator.conflict-scan` step immediately before it; no unrelated external skill is added.
+`chain-plan` accepts only server-resolved skill IDs. High-risk work is blocked unless both Confirm Protocol and Validator were resolved. Confirm Protocol is forced to the first step; the caller must invoke the returned `confirmProtocolRequest`, then submit its authoritative `interaction-answer` response with the same `confirmationRequestId`. Replayed or mismatched approval remains blocked. When `swarm` is present, the plan inserts the internal `coordinator.conflict-scan` step immediately before it; no unrelated external skill is added.
 
 ## Interrupt and keep-alive
 
@@ -134,6 +134,7 @@ Aimlock returns the protocol; it does not start a timer.
 | A5 | 真实分档与逐级升级 | 已实现 | 本地读取真实路径、Git 历史、包边界和 import 图；可从新鲜 ContextBase 地图解析精确目标符号；调用方自报复杂度不能覆盖探测，升级继承现有证据。 |
 | A6 | 读取预算与截止 | 已实现（需宿主路由） | Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/15 分钟；Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额。 |
 | A7 | AutoCoord 物理联锁 | 已实现（需宿主路由） | `gate-issue` 显式选择是否需要协调；协调凭证绑定 Swarm 签名文件租约，`guarded-write` 在同一临界区校验凭证、活动锁和路径范围。活动依赖等待会阻断预算读取。 |
+| A8 | 高风险确认联锁 | 已实现（需宿主调用） | 高风险需求自动路由 Confirm Protocol；`chain-plan` 在权威 `interaction-answer` 返回前保持阻断，并校验请求 ID、审计与回调绑定。 |
 
 ## Safety
 

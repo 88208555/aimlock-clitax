@@ -14,6 +14,11 @@ const CLASSIFY_RULES = [
 ];
 const HIGH_RISK_PATTERNS = [/生产数据|支付|用户隐私|财务|密码|密钥|线上环境|production/i];
 const RISK_LEVEL = Object.freeze({ low: 0, medium: 1, high: 2 });
+const CONFIRM_PROTOCOL_REQUEST_SCHEMA = "confirm-protocol.skill.request/1.0";
+const CONFIRM_INTERACTION_SCHEMA = "confirm.interaction/1.0";
+const CONFIRM_AUDIT_SCHEMA = "confirm.audit-entry/1.0";
+const CONFIRM_STEP = "confirm-protocol";
+const CONFIRM_APPROVE = "approve";
 
 function strongestRisk(...values) {
   return values.filter((value) => value in RISK_LEVEL)
@@ -58,6 +63,67 @@ function resolvedStepIds(input) {
   return { steps };
 }
 
+function confirmationFinding(ruleId, message, example) {
+  return { severity: "P0", ruleId, entityRef: "input.confirmationResult", message,
+    evidence: { example } };
+}
+
+function confirmationRequest(chain, risk, requestId) {
+  return {
+    schemaVersion: CONFIRM_PROTOCOL_REQUEST_SCHEMA,
+    requestId: `confirm-${requestId}`,
+    operation: "interaction-request",
+    input: { interaction: {
+      schemaVersion: CONFIRM_INTERACTION_SCHEMA,
+      requestId,
+      type: "confirm",
+      question: `Approve execution of the ${chain} chain?`,
+      options: [
+        { id: CONFIRM_APPROVE, label: "Approve", hint: "Continue the guarded chain." },
+        { id: "reject", label: "Reject", hint: "Keep the chain blocked." },
+      ],
+      default: null,
+      timeout: null,
+      timeoutAction: "wait",
+      risk: risk === "high" ? "high" : "low",
+      riskDescription: risk === "high"
+        ? "This high-risk chain cannot continue without an explicit human decision." : "",
+      rememberable: false,
+      memoryKey: "",
+      callback: { operation: "resume-aimlock-chain", payload: { chain } },
+    } },
+  };
+}
+
+function validateConfirmationResult(value, chain, risk, requestId) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [confirmationFinding("CONFIRMATION_RESULT_REQUIRED",
+      "a Confirm Protocol interaction-answer result is required before the chain can continue", {})];
+  }
+  const audit = value.auditEntry;
+  const callback = value.callbackRequest;
+  const payload = callback?.payload;
+  const findings = [];
+  if (!audit || audit.schemaVersion !== CONFIRM_AUDIT_SCHEMA || audit.answer !== CONFIRM_APPROVE) {
+    findings.push(confirmationFinding("CONFIRMATION_AUDIT_INVALID",
+      "confirmation audit entry must record an explicit approve answer", { schemaVersion: CONFIRM_AUDIT_SCHEMA, answer: CONFIRM_APPROVE }));
+  }
+  if (!callback || callback.operation !== "resume-aimlock-chain" || payload?.chain !== chain) {
+    findings.push(confirmationFinding("CONFIRMATION_CALLBACK_INVALID",
+      "confirmation callback must resume the same Aimlock chain", { operation: "resume-aimlock-chain", chain }));
+  }
+  if (payload?.answer !== CONFIRM_APPROVE || payload?.requestId !== audit?.requestId
+    || audit?.requestId !== requestId) {
+    findings.push(confirmationFinding("CONFIRMATION_DECISION_INVALID",
+      "confirmation callback and audit entry must bind the same approved request", { answer: CONFIRM_APPROVE }));
+  }
+  if (risk === "high" && audit?.risk !== "high") {
+    findings.push(confirmationFinding("CONFIRMATION_RISK_INVALID",
+      "high-risk chains require an isolated high-risk confirmation", { risk: "high" }));
+  }
+  return findings;
+}
+
 function buildChainPlan(input) {
   const chain = String(input?.chain ?? "").trim();
   if (!CHAIN_KINDS.includes(chain)) {
@@ -65,15 +131,22 @@ function buildChainPlan(input) {
   }
   const resolved = resolvedStepIds(input);
   if (resolved.findings) return resolved;
-  const steps = resolved.steps.flatMap((step) => step === "swarm"
+  const expandedSteps = resolved.steps.flatMap((step) => step === "swarm"
     ? ["coordinator.conflict-scan", "swarm"] : [step]);
   const risk = String(input?.risk ?? "").trim();
   if (!["low", "medium", "high"].includes(risk)) {
     return { findings: [{ severity: "P0", ruleId: "CHAIN_RISK", entityRef: "input.risk", message: "risk must be low, medium, or high", evidence: { example: "medium" } }] };
   }
-  if (risk === "high" && !steps.includes("validator")) {
-    return { findings: [{ severity: "P0", ruleId: "HIGH_RISK_VALIDATOR", entityRef: "input.steps", message: "high-risk work requires a server-resolved validator step", evidence: { example: ["validator"] } }] };
-  }
+  const steps = expandedSteps.includes(CONFIRM_STEP)
+    ? [CONFIRM_STEP, ...expandedSteps.filter((step) => step !== CONFIRM_STEP)] : expandedSteps;
+  const highRiskFindings = [];
+  if (risk === "high" && !steps.includes(CONFIRM_STEP)) highRiskFindings.push({ severity: "P0",
+    ruleId: "HIGH_RISK_CONFIRMATION", entityRef: "input.steps",
+    message: "high-risk work requires a server-resolved confirm-protocol step", evidence: { example: [CONFIRM_STEP] } });
+  if (risk === "high" && !steps.includes("validator")) highRiskFindings.push({ severity: "P0",
+    ruleId: "HIGH_RISK_VALIDATOR", entityRef: "input.steps",
+    message: "high-risk work requires a server-resolved validator step", evidence: { example: ["validator"] } });
+  if (highRiskFindings.length) return { findings: highRiskFindings };
   const completed = Array.isArray(input?.completed) ? input.completed : [];
   const expected = steps.slice(0, completed.length);
   if (new Set(completed).size !== completed.length
@@ -81,9 +154,20 @@ function buildChainPlan(input) {
     return { findings: [{ severity: "P0", ruleId: "CHAIN_ORDER", entityRef: "input.completed", message: "completed must be an exact chain prefix", evidence: { example: expected } }] };
   }
   const current = steps[completed.length] ?? null;
+  const requestId = String(input?.confirmationRequestId ?? "").trim();
+  if (steps.includes(CONFIRM_STEP) && !requestId) {
+    return { findings: [confirmationFinding("CONFIRMATION_REQUEST_ID",
+      "confirmationRequestId is required to bind the Confirm Protocol request", { confirmationRequestId: "chain-request-1" })] };
+  }
+  if (completed.includes(CONFIRM_STEP)) {
+    const confirmationFindings = validateConfirmationResult(input.confirmationResult, chain, risk, requestId);
+    if (confirmationFindings.length) return { findings: confirmationFindings };
+  }
   return { chain: steps, chainKind: chain, ready: current ? [current] : [], current,
     blocked: current ? steps.slice(completed.length + 1).map((step) => ({ step, waitingFor: [current] })) : [],
-    totalSteps: steps.length, completedSteps: completed.length, risk };
+    totalSteps: steps.length, completedSteps: completed.length, risk,
+    confirmationRequired: steps.includes(CONFIRM_STEP),
+    ...(current === CONFIRM_STEP ? { confirmProtocolRequest: confirmationRequest(chain, risk, requestId) } : {}) };
 }
 
 function submitFeedback(input) {
@@ -125,7 +209,7 @@ const RESPONSE_SCHEMA = "aimlock.skill.response/1.1";
 const ERROR_SCHEMA = "aimlock.skill.error/1.0";
 const CONTRACT_SCHEMA = "aimlock.scope-contract/1.0";
 const COMPILER_NAME = "aimlock";
-const COMPILER_VERSION = "v7.0.30";
+const COMPILER_VERSION = "v7.0.31";
 const KEEP_ALIVE_SECONDS = 90;
 const KEEP_ALIVE_MESSAGE = "智能目标持续执行中，请勿关闭！";
 const BYPASS_LINE_BUDGET = 500;
@@ -445,6 +529,10 @@ const OPERATION_SCHEMAS = Object.freeze({
         risk: { type: "string", enum: ["low", "medium", "high"] },
         steps: { type: "array", items: { type: "string" } },
         completed: { type: "array", items: { type: "string" }, optional: true },
+        confirmationRequestId: { type: "string", optional: true,
+          description: "stable request id returned for the Confirm Protocol round trip" },
+        confirmationResult: { type: "object", optional: true,
+          description: "authoritative interaction-answer response from Confirm Protocol" },
       },
     },
     output: {
@@ -456,6 +544,8 @@ const OPERATION_SCHEMAS = Object.freeze({
         current: { type: ["string", "null"] },
         totalSteps: { type: "number" },
         completedSteps: { type: "number" },
+        confirmationRequired: { type: "boolean" },
+        confirmProtocolRequest: { type: "object", optional: true },
       },
     },
   },
@@ -847,7 +937,7 @@ function officialMatchAllowed(slug, demand) {
   const active = demand.mode !== "bypass";
   const codeGoal = demand.goalKind === "code" || demand.goalKind === "mixed";
   if (slug === "calctool") return demand.goalKind === "calculator" || demand.requiresCalculator;
-  if (slug === "confirm-protocol") return demand.requiresConfirmation;
+  if (slug === "confirm-protocol") return demand.requiresConfirmation || demand.risk === "high";
   if (slug === "archguard") return codeGoal && (demand.hasArchitectureContract || demand.newProject);
   if (slug === "blueprint") return active && ["probe", "swarm"].includes(demand.mode)
     && demand.contractUnclear && !demand.hasBlueprint;
@@ -900,7 +990,7 @@ function routeSkills(input) {
   const demand = { mode, goalKind, risk: risk.value, hasBlueprint: input.hasBlueprint,
     contractUnclear: input.contractUnclear,
     hasArchitectureContract: input.hasArchitectureContract, newProject: input.newProject,
-    requiresConfirmation: input.requiresConfirmation, requiresCalculator: input.requiresCalculator,
+    requiresConfirmation: input.requiresConfirmation || risk.value === "high", requiresCalculator: input.requiresCalculator,
     requiresMerge: input.requiresMerge, requiresValidation: input.requiresValidation };
   const resolved = validateResolvedSkills(input, demand);
   if (resolved.findings) return resolved;
@@ -1292,7 +1382,8 @@ async function executeRun(request) {
   if (operation === "snapshot-verify") return finish(requestId, snapshotVerify(input));
   if (operation === "run-status") return finish(requestId, runStatus(input));
   if (operation === "chain-plan") {
-    const result = buildChainPlan(input);
+    const result = buildChainPlan({ ...input,
+      confirmationRequestId: input.confirmationRequestId ?? requestId });
     if (result.findings) return blockedResponse(requestId, result.findings);
     return okResponse(requestId, { ...result, nextStep: result.ready.length ? { operation: result.ready[0], instruction: `Execute first ready step: ${result.ready[0]}` } : { operation: "chain-status", instruction: "All steps blocked or complete." } });
   }
