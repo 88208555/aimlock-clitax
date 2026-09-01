@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.31
+Package version: v7.0.32
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
