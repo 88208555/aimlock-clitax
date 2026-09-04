@@ -25,6 +25,37 @@ async function regularFile(path, code, message) {
   return path
 }
 
+function failureHandled(task, tasks, inspected = new Set()) {
+  if (inspected.has(task.taskId)) return false
+  inspected.add(task.taskId)
+  const replacement = tasks.find((item) => item.supersedesTaskId === task.taskId)
+  return replacement && (['active', 'completed'].includes(replacement.status)
+    || (['failed', 'reclaimed'].includes(replacement.status) && failureHandled(replacement, tasks, inspected)))
+}
+
+function parkedAfterDecision(task, tasks, decisions) {
+  if (task.status !== 'blocked' || task.blockedReason !== 'human-decision') return false
+  const decision = decisions.findLast((item) => item.agents.includes(task.agentId))
+  return decision?.status === 'resolved'
+    && tasks.some((active) => active.status === 'active' && decision.answer === 'resume:' + active.agentId)
+}
+
+function assertChainRunnable(state, chainId) {
+  const tasks = state.tasks.filter((task) => task.chainId === chainId)
+  if (!tasks.length) return
+  const wait = state.waits.find((item) => item.chainId === chainId && item.status === 'active')
+  if (wait) fail('AIMLOCK_COORDINATION_WAITING', 'chain ' + chainId + ' is suspended until ' + wait.event + ' or ' + wait.deadlineAt)
+  const pending = state.decisions.some((decision) => decision.status === 'pending'
+    && tasks.some((task) => decision.agents.includes(task.agentId)))
+  const unresolved = tasks.some((task) => ['failed', 'reclaimed'].includes(task.status)
+    && !failureHandled(task, tasks))
+  if (!tasks.some((task) => task.status === 'active') || pending || unresolved
+    || tasks.some((task) => task.status === 'waiting'
+      || (task.status === 'blocked' && !parkedAfterDecision(task, tasks, state.decisions)))) {
+    fail('AIMLOCK_COORDINATION_BLOCKED', 'chain has no active task or has unresolved failures, waits, or human decisions')
+  }
+}
+
 async function verifyLeaseAgainstState(state, root, input) {
   const leasePath = safeRelativePath(input.coordinationLeasePath, 'coordinationLeasePath')
   if (!leasePath.startsWith('.coord/leases/')) {
@@ -37,6 +68,7 @@ async function verifyLeaseAgainstState(state, root, input) {
   await regularFile(publicPath, 'AIMLOCK_COORDINATION_AUTHORITY_INVALID', 'coordination public key must be a regular file')
   const publicKey = await readFile(publicPath, 'utf8')
   const chainId = identifier(input.chainId, 'chainId')
+  assertChainRunnable(state, chainId)
   const targetPaths = input.targetPaths.map((path) => safeRelativePath(path, 'targetPath'))
   const signatureValid = typeof lease.signature === 'string'
     && verify(null, Buffer.from(JSON.stringify(leasePayload(lease))), publicKey,
@@ -55,6 +87,7 @@ async function verifyLeaseAgainstState(state, root, input) {
     && issuedAt <= Date.now() && expiresAt > Date.now()
     && signatureValid
     && lock?.status === 'active' && lock.leaseId === lease.leaseId
+    && state.tasks.some((task) => task.taskId === lock.taskId && task.status === 'active')
     && lock.chainId === lease.chainId && lock.agentId === lease.agentId
     && lock.expiresAt === lease.expiresAt
   if (!valid) {
@@ -82,10 +115,7 @@ async function assertChainNotSuspended(input) {
   if (!statePath.exists) return { suspended: false }
   const chainId = identifier(input.chainId, 'chainId')
   return withCoordinationReadLock(root, async (state) => {
-    const wait = state.waits.find((item) => item.chainId === chainId && item.status === 'active')
-    if (wait) {
-      fail('AIMLOCK_COORDINATION_WAITING', `chain ${chainId} is suspended until ${wait.event} or ${wait.deadlineAt}`)
-    }
+    assertChainRunnable(state, chainId)
     return { suspended: false }
   })
 }

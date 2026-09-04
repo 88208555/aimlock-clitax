@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { cwd, stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
+import { CHAIN_USAGE, runChainCli } from './aimlock-chain-cli.mjs'
 import { defaultUsage, dispatchOfficialSkillCli, runIntakeHandshake } from './installer.mjs'
 import {
   LOCAL_CAPABILITIES,
@@ -90,7 +91,7 @@ export function localAimlockApplicability(facts) {
 export function aimlockUsage(context) {
   const usage = defaultUsage(context)
   if (!usage.includes(COMMON_RUN_USAGE)) throw new Error('Shared CLI run usage contract changed')
-  return usage.replace(COMMON_RUN_USAGE, AIMLOCK_RUN_USAGE)
+  return usage.replace(COMMON_RUN_USAGE, AIMLOCK_RUN_USAGE) + '\n\n' + CHAIN_USAGE
 }
 
 async function collectApplicability(input, output) {
@@ -184,7 +185,9 @@ async function dispatchLocal(args) {
 
 const cliPath = fileURLToPath(import.meta.url)
 if (process.argv[1] && realpathSync(resolve(process.argv[1])) === cliPath) {
-  if (process.argv[2] === 'local') {
+  if (process.argv[2] === 'chain') {
+    await runChainCli(process.argv.slice(3))
+  } else if (process.argv[2] === 'local') {
     try {
       console.log(JSON.stringify(await dispatchLocal(process.argv.slice(3))))
     } catch (error) {

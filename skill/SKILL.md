@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.33
+Package version: v7.0.34
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -161,3 +161,7 @@ Aimlock returns the protocol; it does not start a timer.
 - 本地 CLI 不提供手工评分或评语提交命令，人类不得选择技能分数或填写技能评价；日常聊天不属于评价协议。
 
 调用示例：`npx cli-aimlock@latest invoke <operation> '<JSON对象>'`。IDE 集成可向 `npx cli-aimlock@latest broker` 的 stdin 发送 `{"operation":"capabilities","input":{}}`。
+
+## 宿主持久执行
+
+使用 [chain-executor.md](references/chain-executor.md) 的显式 `chain init/resume/status/answer` 协议驱动本地持久步骤。`run` 的需求采集、远端 `nextStep` 与 `completed` 均不等于已执行。只有真实 broker/协调器/命令结果及绑定证据能推进；未答复人工裁决禁止恢复，发送后结果不确定禁止自动重发。CLI 终端不提供 OS 隔离或独立可信 runner。

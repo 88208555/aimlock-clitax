@@ -31,7 +31,7 @@ import { assertChainNotSuspended } from './aimlock-coordination.mjs'
 
 const execFile = promisify(execFileCallback)
 const BUDGET_SCHEMA = 'aimlock.read-budget/1.0'
-const CONFIRMATION_SCHEMA = 'confirm-protocol.answer/1.0'
+const CONFIRMATION_SCHEMA = 'confirm-protocol.skill.response/1.0'
 const MAX_DISCOVERED_FILES = 1_000
 const MAX_SOURCE_BYTES = 1_048_576
 const TOKEN_ESTIMATE_ALGORITHM = 'utf8-bytes-div-4-ceil'
@@ -52,6 +52,20 @@ const schema = (required, properties) => ({ type: 'object', additionalProperties
 const stringSchema = { type: 'string', minLength: 1 }
 const stringArraySchema = { type: 'array', items: stringSchema }
 const objectValueSchema = { type: 'object' }
+const BUDGET_ADDITIONS_SCHEMA = schema(['files', 'tokenEstimate', 'durationMs'], {
+  files: { type: 'integer', minimum: 0 }, tokenEstimate: { type: 'integer', minimum: 0 }, durationMs: { type: 'integer', minimum: 0 },
+})
+const BUDGET_CONFIRMATION_SCHEMA = schema(['schemaVersion', 'requestId', 'status', 'callbackRequest', 'auditEntry', 'nextStep'], {
+  schemaVersion: { const: 'confirm-protocol.skill.response/1.0' }, requestId: stringSchema, status: { const: 'succeeded' },
+  callbackRequest: schema(['operation', 'payload'], { operation: { const: 'budget-extend' },
+    payload: schema(['chainId', 'additions', 'requestId', 'answer'], { chainId: stringSchema,
+      additions: BUDGET_ADDITIONS_SCHEMA, requestId: stringSchema, answer: { const: 'approve' } }) }),
+  auditEntry: schema(['schemaVersion', 'auditId', 'requestId', 'actorId', 'question', 'answer', 'remembered', 'risk', 'answeredAt'], {
+    schemaVersion: { const: 'confirm.audit-entry/1.0' }, auditId: stringSchema, requestId: stringSchema, actorId: stringSchema,
+    question: stringSchema, answer: { const: 'approve' }, remembered: { type: 'boolean' }, risk: { const: 'low' },
+    answeredAt: { type: 'string', format: 'date-time' },
+  }), nextStep: objectValueSchema,
+})
 const LOCAL_OPERATION_SCHEMAS = Object.freeze({
   capabilities: schema([], {}),
   probe: schema(['goal', 'targetHints'], { goal: stringSchema, targetHints: stringArraySchema,
@@ -64,7 +78,7 @@ const LOCAL_OPERATION_SCHEMAS = Object.freeze({
   'budget-read': schema(['chainId', 'path'], { chainId: stringSchema, path: stringSchema }),
   'budget-status': schema(['chainId'], { chainId: stringSchema }),
   'budget-extend': schema(['chainId', 'confirmation', 'additions'], {
-    chainId: stringSchema, confirmation: objectValueSchema, additions: objectValueSchema }),
+    chainId: stringSchema, confirmation: BUDGET_CONFIRMATION_SCHEMA, additions: BUDGET_ADDITIONS_SCHEMA }),
   'gate-issue': schema(['chainId', 'snapshotRoot', 'receipt', 'contract', 'nodes', 'coordinationRequired'], {
     chainId: stringSchema, snapshotRoot: stringSchema, receipt: objectValueSchema,
     contract: objectValueSchema, nodes: { type: 'array', items: objectValueSchema },
@@ -331,23 +345,53 @@ async function readFileWithinBudget(input) {
   })
 }
 
+async function checkCachedReadAccess(input) {
+  const root = await repositoryRoot(input.repositoryRoot)
+  const chainId = identifier(input.chainId, 'chainId')
+  await assertChainNotSuspended({ repositoryRoot: root, chainId })
+  const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
+  return withFileLock(budgetPath, async () => {
+    const { state } = await readBudget(root, chainId)
+    const path = safeRelativePath(input.path)
+    const budget = budgetView(state)
+    if (budget.remainingDurationMs === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read deadline exhausted')
+    if (budget.remainingTokenEstimate === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read token estimate budget exhausted')
+    if (!state.uniqueFiles.includes(path)) fail('AIMLOCK_CACHE_UNCHARGED', 'cached source was not read by this chain')
+    return { schemaVersion: LOCAL_SCHEMA, path, budget }
+  })
+}
+
 async function readBudgetStatus(input) {
   const root = await repositoryRoot(input.repositoryRoot)
   return budgetView((await readBudget(root, input.chainId)).state)
 }
 
+function confirmedBudgetExtension(input) {
+  const confirmation = input.confirmation
+  const audit = confirmation?.auditEntry
+  const callback = confirmation?.callbackRequest
+  const payload = callback?.payload
+  const fields = ['files', 'tokenEstimate', 'durationMs']
+  if (!confirmation || confirmation.schemaVersion !== CONFIRMATION_SCHEMA || confirmation.status !== 'succeeded'
+    || audit?.schemaVersion !== 'confirm.audit-entry/1.0' || audit.risk !== 'low' || audit.answer !== 'approve'
+    || typeof audit.remembered !== 'boolean' || !Number.isFinite(Date.parse(audit.answeredAt))
+    || callback?.operation !== 'budget-extend' || payload?.answer !== 'approve'
+    || payload.chainId !== input.chainId || payload.requestId !== audit.requestId
+    || !payload.additions || fields.some((key) => payload.additions[key] !== input.additions?.[key])) {
+    fail('AIMLOCK_CONFIRMATION_REQUIRED', 'a low-risk Confirm Protocol interaction-answer bound to this chain and exact additions is required')
+  }
+  identifier(audit.actorId, 'actorId')
+  identifier(audit.requestId, 'requestId')
+  return identifier(audit.auditId, 'auditId')
+}
+
 async function extendReadBudget(input) {
   const root = await repositoryRoot(input.repositoryRoot)
-  const confirmation = input.confirmation
-  if (!confirmation || confirmation.schemaVersion !== CONFIRMATION_SCHEMA
-    || confirmation.confirmed !== true || confirmation.risk !== 'low'
-    || !identifier(confirmation.confirmationId, 'confirmationId')) {
-    fail('AIMLOCK_CONFIRMATION_REQUIRED', 'a low-risk confirmation receipt is required')
-  }
+  const confirmationId = confirmedBudgetExtension(input)
   const additions = input.additions
-  if (!additions || !Number.isInteger(additions.files) || additions.files < 0
-    || !Number.isInteger(additions.tokenEstimate) || additions.tokenEstimate < 0
-    || !Number.isInteger(additions.durationMs) || additions.durationMs < 0
+  if (!additions || !Number.isSafeInteger(additions.files) || additions.files < 0
+    || !Number.isSafeInteger(additions.tokenEstimate) || additions.tokenEstimate < 0
+    || !Number.isSafeInteger(additions.durationMs) || additions.durationMs < 0
     || additions.files + additions.tokenEstimate + additions.durationMs === 0) {
     fail('AIMLOCK_EXTENSION_INVALID', 'budget additions must contain a positive integer increase')
   }
@@ -356,6 +400,9 @@ async function extendReadBudget(input) {
   return withFileLock(budgetPath, async () => {
     const authority = await readBudget(root, chainId)
     const state = authority.state
+    if (state.extensions.some((item) => item.confirmationId === confirmationId)) {
+      fail('AIMLOCK_CONFIRMATION_REPLAYED', 'this budget confirmation has already been applied')
+    }
     const updated = {
       ...state,
       maxFiles: state.maxFiles + additions.files,
@@ -363,14 +410,14 @@ async function extendReadBudget(input) {
         ? null : (state.maxTokenEstimate ?? 0) + additions.tokenEstimate,
       maxDurationMs: state.maxDurationMs + additions.durationMs,
       extensions: [...state.extensions, {
-        confirmationId: confirmation.confirmationId,
+        confirmationId,
         additions,
         at: new Date().toISOString(),
       }],
     }
     await atomicJson(authority.path, updated)
     await appendAudit(root, { event: 'read-budget-extended', chainId,
-      confirmationId: confirmation.confirmationId, additions })
+      confirmationId, additions })
     return budgetView(updated)
   })
 }
@@ -395,6 +442,7 @@ export {
   LOCAL_SCHEMA,
   PASS_SCHEMA,
   READ_BUDGETS,
+  checkCachedReadAccess,
   extendReadBudget,
   guardedWriteFile,
   initializeReadBudget,
