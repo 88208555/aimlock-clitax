@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.34
+Package version: v7.0.35
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -165,3 +165,12 @@ Aimlock returns the protocol; it does not start a timer.
 ## 宿主持久执行
 
 使用 [chain-executor.md](references/chain-executor.md) 的显式 `chain init/resume/status/answer` 协议驱动本地持久步骤。`run` 的需求采集、远端 `nextStep` 与 `completed` 均不等于已执行。只有真实 broker/协调器/命令结果及绑定证据能推进；未答复人工裁决禁止恢复，发送后结果不确定禁止自动重发。CLI 终端不提供 OS 隔离或独立可信 runner。
+
+## 服务端沙箱规划与 IDE 执行
+
+1. 用户在模型设置中启用自己的模型地址、API Key 和模型名后，规划优先使用该配置；未启用个人模型时使用官方模型并执行有限套餐额度。个人模型失败必须明确报错，禁止自动切换模型或消耗官方额度。
+2. 准备请求 JSON，明确 requestId、目标、允许文件、最大修改行数和批准的检查命令；运行 `npx cli-aimlock@latest brain plan <repositoryRoot> <request.json>`。服务端调用模型规划，再由隔离沙箱编译结构化计划；保留返回的 request/response 交接包。
+3. 审查返回计划的允许范围、基线哈希和检查命令；完成现有 Aimlock 范围、快照和写入门禁后，由 IDE 修改代码。计划本身不授权扩大范围，不替代写入门禁。
+4. 运行 `npx cli-aimlock@latest brain check <repositoryRoot> <handoff.json>` 执行批准的检查并回传产物哈希和结果。普通 IDE 回传属于 client-reported，不能据此声称可信验证通过。
+5. 只有已批准的可信 runner 生成与本次计划和报告绑定的签名收据后，才运行 `npx cli-aimlock@latest brain validate <repositoryRoot> <validation.json>`。没有可信收据时保持已回传状态，不伪造验证。
+6. 请求发送后结果不确定时，先用 `brain status <repositoryRoot> <status.json>` 按 requestId 或 planId 查询；禁止自动重发规划或重复计费。

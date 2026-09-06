@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { cwd, stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
+import { runBrainCli } from './brain-client.mjs'
 import { CHAIN_USAGE, runChainCli } from './aimlock-chain-cli.mjs'
 import { defaultUsage, dispatchOfficialSkillCli, runIntakeHandshake } from './installer.mjs'
 import {
@@ -185,7 +186,9 @@ async function dispatchLocal(args) {
 
 const cliPath = fileURLToPath(import.meta.url)
 if (process.argv[1] && realpathSync(resolve(process.argv[1])) === cliPath) {
-  if (process.argv[2] === 'chain') {
+  if (process.argv[2] === 'brain') {
+    await runBrainCli(process.argv.slice(3))
+  } else if (process.argv[2] === 'chain') {
     await runChainCli(process.argv.slice(3))
   } else if (process.argv[2] === 'local') {
     try {

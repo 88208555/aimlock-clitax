@@ -3,14 +3,15 @@
     "cli-aimlock": "./cli.mjs"
   },
   "dependencies": {
-    "cli-swarm": "7.0.34"
+    "cli-swarm": "7.0.35"
   },
   "description": "Aimlock skill installer for CLI.Tax: lock a user request into an executable aim and route Blueprint, Swarm, and Calctool.",
   "exports": {
     "./coordination": "./aimlock-coordination.mjs",
     "./local-runner": "./aimlock-local-runner.mjs",
     "./runtime": "./aimlock-runtime.mjs",
-    "./chain-executor": "./aimlock-chain-executor.mjs"
+    "./chain-executor": "./aimlock-chain-executor.mjs",
+    "./brain-client": "./brain-client.mjs"
   },
   "files": [
     "cli.mjs",
@@ -33,6 +34,8 @@
     "aimlock-local-gate.mjs",
     "aimlock-local-runner.mjs",
     "aimlock-runtime.mjs",
+    "brain-client.mjs",
+    "brain-client-files.mjs",
     "skill/references/chain-executor.md"
   ],
   "license": "UNLICENSED",
@@ -42,5 +45,5 @@
     "url": "https://github.com/88208555/aimlock-clitax.git"
   },
   "type": "module",
-  "version": "7.0.34"
+  "version": "7.0.35"
 }
