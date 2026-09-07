@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.35
+Package version: v7.0.36
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -64,7 +64,7 @@ Only after the applicability gate activates Aimlock:
 1. Call local `capabilities`, then `probe`; use only its filesystem, Git-history, package-boundary, and import-graph facts for the initial mode. Exact `targetSymbols` may resolve through a fresh ContextBase map; missing, ambiguous, or stale map entries block.
 2. Call remote `capabilities`, `intake`, and `classify`. A fallback `bypass` response stops the Aimlock chain.
 3. Call `scope-contract`; empty allowed paths are blocked. Initialize the mode's local read budget before exploration.
-4. Route every source read through local `budget-read`. Exhaustion requires `execute`, `plan`, or `blocked`; only a low-risk Confirm Protocol receipt may extend it.
+4. Route every source read through local `budget-read`. File/token exhaustion requires `execute`, `plan`, or `blocked`, or an exact Confirm Protocol budget extension. Time may renew automatically only after the one-time task-bound approval described below.
 5. Call `skill-route`. The server queries the current published official directory and injects only matched skills.
 6. For Probe or Swarm, workers inspect read-only and return modification nodes. Lock stays on the current agent.
 7. Call `propose-nodes`, `accept-nodes`, `snapshot-plan`, and `snapshot-verify` in order.
@@ -104,9 +104,23 @@ Caller-supplied full catalogs and local registry flags are forbidden. `serverRes
 - `run-status`, `chain-plan`, `chain-status`
 - `delivery-doc`, `validate-json`, `feedback`
 
-Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-read`, `budget-status`, `budget-extend`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
+Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-read`, `budget-status`, `budget-extend`, `budget-auto-renew-request`, `budget-auto-renew`, `budget-auto-renew-stop`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
 
 `chain-plan` accepts only server-resolved skill IDs. High-risk work is blocked unless both Confirm Protocol and Validator were resolved. Confirm Protocol is forced to the first step; the caller must invoke the returned `confirmProtocolRequest`, then submit its authoritative `interaction-answer` response with the same `confirmationRequestId`. Replayed or mismatched approval remains blocked. When `swarm` is present, the plan inserts the internal `coordinator.conflict-scan` step immediately before it; no unrelated external skill is added.
+
+## Long-task read-time renewal
+
+Swarm starts with 60 minutes; Lock and Probe remain 2 and 8 minutes. Time is wall-clock elapsed since budget initialization, including waits. Renewal is evaluated on a budgeted source/cache read, never by `budget-status` or a background timer.
+
+An expired but still authorized budget reports `autoRenewEligible: true`, `decisionRequired: false`, and `nextActions: ["budget-read"]`; continue through that read operation to apply the permitted time extension. A status query never consumes an interval.
+
+1. Call `budget-auto-renew-request` with `chainId`, a unique `requestId`, `scope: {goal, allowedPaths}`, and `policy: {intervalMs, maxRenewals}`. Use literal repository-relative files/directories from the accepted task scope. The returned Confirm interaction states the exact task, scope, interval and total renewal cap.
+2. Render that interaction to the user once and obtain an authoritative Confirm Protocol `interaction-answer` response. Invoke `budget-auto-renew` with the same chain/scope/policy and that `confirmation`. A generic earlier approval, remembered response, altered scope or replay does not authorize renewal.
+3. Expired reads within that scope automatically consume the required fixed intervals up to the approved `maxRenewals`. Each interval records its reason, timestamp, count and cumulative duration. File/token limits and write permissions do not increase; exhausted quotas or renewal caps still explicitly block. Missed wall-clock intervals count toward the cap.
+4. Call `budget-auto-renew-stop` with `reason: "revoked"` when the user revokes renewal, and `reason: "completed"` when the task finishes. Completion prohibits further reads. The local persistent chain executor also closes an existing budget when execution succeeds. Other IDE hosts must send the completion signal; this package cannot observe unrelated IDE completion automatically.
+5. The authorization is immutable for that chain. Revocation never creates a new allowance; a later expansion requires a separate exact `budget-extend` approval, and a new task must use its own chain. Never infer permission from a long-running task or from authorization to implement this feature.
+
+Example request input: `{"chainId":"task-42","requestId":"renew-task-42","scope":{"goal":"Complete the approved refactor","allowedPaths":["src/module"]},"policy":{"intervalMs":3600000,"maxRenewals":8}}`.
 
 ## Interrupt and keep-alive
 
@@ -132,7 +146,7 @@ Aimlock returns the protocol; it does not start a timer.
 | A3 | 官方技能按需路由 | 已实现 | 服务端读取当前已发布官方目录，只注入与需求匹配的技能；不加载完整目录。 |
 | A4 | 快照写入门禁 | 已实现（需宿主路由） | 本地运行器重读真实文件副本并签发 Ed25519 短期凭证；凭证绑定 chainId、快照摘要和路径。只有经过 `guarded-write` 的写入能被物理拦截，IDE 宿主必须关闭旁路批量写入口。 |
 | A5 | 真实分档与逐级升级 | 已实现 | 本地读取真实路径、Git 历史、包边界和 import 图；可从新鲜 ContextBase 地图解析精确目标符号；调用方自报复杂度不能覆盖探测，升级继承现有证据。 |
-| A6 | 读取预算与截止 | 已实现（需宿主路由） | Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/15 分钟；Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额。 |
+| A6 | 读取预算与截止 | 已实现（需宿主路由） | Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/60 分钟；Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额。 |
 | A7 | AutoCoord 物理联锁 | 已实现（需宿主路由） | `gate-issue` 显式选择是否需要协调；协调凭证绑定 Swarm 签名文件租约，`guarded-write` 在同一临界区校验凭证、活动锁和路径范围。活动依赖等待会阻断预算读取。 |
 | A8 | 高风险确认联锁 | 已实现（需宿主调用） | 高风险需求自动路由 Confirm Protocol；`chain-plan` 在权威 `interaction-answer` 返回前保持阻断，并校验请求 ID、审计与回调绑定。 |
 

@@ -9,6 +9,9 @@ import { CHAIN_USAGE, runChainCli } from './aimlock-chain-cli.mjs'
 import { defaultUsage, dispatchOfficialSkillCli, runIntakeHandshake } from './installer.mjs'
 import {
   LOCAL_CAPABILITIES,
+  authorizeReadBudgetRenewal,
+  requestReadBudgetRenewal,
+  stopReadBudgetRenewal,
   extendReadBudget,
   guardedWriteFile,
   initializeReadBudget,
@@ -93,6 +96,8 @@ export function aimlockUsage(context) {
   const usage = defaultUsage(context)
   if (!usage.includes(COMMON_RUN_USAGE)) throw new Error('Shared CLI run usage contract changed')
   return usage.replace(COMMON_RUN_USAGE, AIMLOCK_RUN_USAGE) + '\n\n' + CHAIN_USAGE
+    + '\n\nRead-time renewal: local budget-auto-renew-request <repositoryRoot> prepares one Confirm Protocol approval;'
+    + '\nlocal budget-auto-renew activates the approved chain/scope/policy; budget-auto-renew-stop revokes or completes it.'
 }
 
 async function collectApplicability(input, output) {
@@ -169,6 +174,9 @@ async function runLocalOperation(operation, repositoryRoot, input) {
   if (operation === 'budget-read') return readFileWithinBudget(scoped)
   if (operation === 'budget-status') return readBudgetStatus(scoped)
   if (operation === 'budget-extend') return extendReadBudget(scoped)
+  if (operation === 'budget-auto-renew-request') return requestReadBudgetRenewal(scoped)
+  if (operation === 'budget-auto-renew') return authorizeReadBudgetRenewal(scoped)
+  if (operation === 'budget-auto-renew-stop') return stopReadBudgetRenewal(scoped)
   if (operation === 'gate-issue') return issueMutationPass(scoped)
   if (operation === 'gate-verify') return verifyMutationPassFile(scoped)
   if (operation === 'guarded-write') return guardedWriteFile(scoped)

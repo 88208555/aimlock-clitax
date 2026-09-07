@@ -3,7 +3,7 @@
     "cli-aimlock": "./cli.mjs"
   },
   "dependencies": {
-    "cli-swarm": "7.0.35"
+    "cli-swarm": "7.0.36"
   },
   "description": "Aimlock skill installer for CLI.Tax: lock a user request into an executable aim and route Blueprint, Swarm, and Calctool.",
   "exports": {
@@ -33,6 +33,10 @@
     "aimlock-local-fs.mjs",
     "aimlock-local-gate.mjs",
     "aimlock-local-runner.mjs",
+    "aimlock-read-budget-state.mjs",
+    "aimlock-read-budget.mjs",
+    "aimlock-read-budget-renewal.mjs",
+    "aimlock-read-budget-schemas.mjs",
     "aimlock-runtime.mjs",
     "brain-client.mjs",
     "brain-client-files.mjs",
@@ -45,5 +49,5 @@
     "url": "https://github.com/88208555/aimlock-clitax.git"
   },
   "type": "module",
-  "version": "7.0.35"
+  "version": "7.0.36"
 }

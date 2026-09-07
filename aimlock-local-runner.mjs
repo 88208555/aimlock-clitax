@@ -3,22 +3,15 @@ import {
   lstat,
   readFile,
   readdir,
-  writeFile,
 } from 'node:fs/promises'
 import { dirname, extname, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import {
   LOCAL_SCHEMA,
   appendAudit,
-  atomicJson,
-  ensureManagedDirectory,
   fail,
-  identifier,
-  managedPath,
   repositoryRoot,
   resolvedProjectPath,
-  safeRelativePath,
-  withFileLock,
 } from './aimlock-local-fs.mjs'
 import {
   PASS_SCHEMA,
@@ -27,24 +20,19 @@ import {
   verifyMutationPassFile,
 } from './aimlock-local-gate.mjs'
 import { resolveContextMapTargets } from './aimlock-context-map.mjs'
-import { assertChainNotSuspended } from './aimlock-coordination.mjs'
+import { BUDGET_SCHEMA, TOKEN_ESTIMATE_ALGORITHM, READ_BUDGETS, initializeReadBudget } from './aimlock-read-budget-state.mjs'
+import { checkCachedReadAccess, extendReadBudget, readBudgetStatus, readFileWithinBudget } from './aimlock-read-budget.mjs'
+import { authorizeReadBudgetRenewal, requestReadBudgetRenewal, stopReadBudgetRenewal } from './aimlock-read-budget-renewal.mjs'
+import { AUTO_RENEW_OPERATION_SCHEMAS } from './aimlock-read-budget-schemas.mjs'
 
 const execFile = promisify(execFileCallback)
-const BUDGET_SCHEMA = 'aimlock.read-budget/1.0'
-const CONFIRMATION_SCHEMA = 'confirm-protocol.skill.response/1.0'
 const MAX_DISCOVERED_FILES = 1_000
 const MAX_SOURCE_BYTES = 1_048_576
-const TOKEN_ESTIMATE_ALGORITHM = 'utf8-bytes-div-4-ceil'
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx'])
 const IGNORED_DIRECTORIES = new Set([
   '.aimlock', '.git', '.runtime', 'coverage', 'dist', 'node_modules',
 ])
 const MODE_ORDER = Object.freeze(['lock', 'probe', 'swarm'])
-const READ_BUDGETS = Object.freeze({
-  lock: Object.freeze({ maxFiles: 3, maxTokenEstimate: null, maxDurationMs: 120_000 }),
-  probe: Object.freeze({ maxFiles: 10, maxTokenEstimate: 30_000, maxDurationMs: 480_000 }),
-  swarm: Object.freeze({ maxFiles: 30, maxTokenEstimate: 100_000, maxDurationMs: 900_000 }),
-})
 const HIGH_RISK_PATTERN = /生产数据|支付|用户隐私|密码|密钥|凭证|线上环境|production/i
 const IMPORT_PATTERN = /(?:import|export)\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g
 const schema = (required, properties) => ({ type: 'object', additionalProperties: false,
@@ -67,6 +55,7 @@ const BUDGET_CONFIRMATION_SCHEMA = schema(['schemaVersion', 'requestId', 'status
   }), nextStep: objectValueSchema,
 })
 const LOCAL_OPERATION_SCHEMAS = Object.freeze({
+  ...AUTO_RENEW_OPERATION_SCHEMAS,
   capabilities: schema([], {}),
   probe: schema(['goal', 'targetHints'], { goal: stringSchema, targetHints: stringArraySchema,
     targetSymbols: { type: 'array', items: objectValueSchema } }),
@@ -266,167 +255,11 @@ function reassessMode(input) {
   }
 }
 
-async function readBudget(root, chainId) {
-  const id = identifier(chainId, 'chainId')
-  const path = managedPath(root, 'runs', id, 'read-budget.json')
-  const state = JSON.parse(await readFile(path, 'utf8'))
-  if (state.schemaVersion !== BUDGET_SCHEMA || state.chainId !== id) {
-    fail('AIMLOCK_BUDGET_INVALID', 'read budget authority is invalid')
-  }
-  return { path, state }
-}
-
-function budgetView(state, now = Date.now()) {
-  const elapsedMs = now - Date.parse(state.startedAt)
-  const remainingFiles = Math.max(0, state.maxFiles - state.uniqueFiles.length)
-  const remainingTokenEstimate = state.maxTokenEstimate === null ? null
-    : Math.max(0, state.maxTokenEstimate - state.tokenEstimate)
-  const remainingDurationMs = Math.max(0, state.maxDurationMs - elapsedMs)
-  const decisionRequired = remainingFiles === 0 || remainingDurationMs === 0
-    || remainingTokenEstimate === 0
-  return { ...state, elapsedMs, remainingFiles, remainingTokenEstimate, remainingDurationMs,
-    decisionRequired, nextActions: decisionRequired ? ['execute', 'plan', 'blocked'] : [] }
-}
-
-async function initializeReadBudget(input) {
-  const root = await repositoryRoot(input.repositoryRoot)
-  const chainId = identifier(input.chainId, 'chainId')
-  const limits = READ_BUDGETS[input.mode]
-  if (!limits) fail('AIMLOCK_MODE_INVALID', 'mode must be lock, probe, or swarm')
-  const directory = await ensureManagedDirectory(root, 'runs', chainId)
-  const state = {
-    schemaVersion: BUDGET_SCHEMA,
-    chainId,
-    mode: input.mode,
-    startedAt: new Date().toISOString(),
-    ...limits,
-    uniqueFiles: [],
-    readCalls: 0,
-    tokenEstimate: 0,
-    tokenEstimateAlgorithm: TOKEN_ESTIMATE_ALGORITHM,
-    extensions: [],
-  }
-  await writeFile(resolve(directory, 'read-budget.json'), `${JSON.stringify(state)}\n`, {
-    flag: 'wx', mode: 0o600,
-  })
-  await appendAudit(root, { event: 'read-budget-initialized', chainId, mode: input.mode })
-  return budgetView(state)
-}
-
-async function readFileWithinBudget(input) {
-  const root = await repositoryRoot(input.repositoryRoot)
-  const chainId = identifier(input.chainId, 'chainId')
-  await assertChainNotSuspended({ repositoryRoot: root, chainId })
-  const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
-  return withFileLock(budgetPath, async () => {
-    const authority = await readBudget(root, chainId)
-    const path = safeRelativePath(input.path)
-    const state = authority.state
-    const before = budgetView(state)
-    if (before.remainingDurationMs === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read deadline exhausted')
-    const isNew = !state.uniqueFiles.includes(path)
-    if (isNew && before.remainingFiles === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read file budget exhausted')
-    const projectFile = await resolvedProjectPath(root, path)
-    if (!projectFile.status.isFile()) fail('AIMLOCK_READ_NOT_FILE', `${path} is not a file`)
-    const tokenEstimate = Math.ceil(projectFile.status.size / 4)
-    if (before.remainingTokenEstimate !== null && tokenEstimate > before.remainingTokenEstimate) {
-      fail('AIMLOCK_DECISION_REQUIRED', 'read token estimate budget exhausted')
-    }
-    const content = await readFile(projectFile.target, 'utf8')
-    const updated = {
-      ...state,
-      uniqueFiles: isNew ? [...state.uniqueFiles, path] : state.uniqueFiles,
-      readCalls: state.readCalls + 1,
-      tokenEstimate: state.tokenEstimate + tokenEstimate,
-    }
-    await atomicJson(authority.path, updated)
-    await appendAudit(root, { event: 'read-consumed', chainId, path, tokenEstimate })
-    return { schemaVersion: LOCAL_SCHEMA, path, content, budget: budgetView(updated) }
-  })
-}
-
-async function checkCachedReadAccess(input) {
-  const root = await repositoryRoot(input.repositoryRoot)
-  const chainId = identifier(input.chainId, 'chainId')
-  await assertChainNotSuspended({ repositoryRoot: root, chainId })
-  const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
-  return withFileLock(budgetPath, async () => {
-    const { state } = await readBudget(root, chainId)
-    const path = safeRelativePath(input.path)
-    const budget = budgetView(state)
-    if (budget.remainingDurationMs === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read deadline exhausted')
-    if (budget.remainingTokenEstimate === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read token estimate budget exhausted')
-    if (!state.uniqueFiles.includes(path)) fail('AIMLOCK_CACHE_UNCHARGED', 'cached source was not read by this chain')
-    return { schemaVersion: LOCAL_SCHEMA, path, budget }
-  })
-}
-
-async function readBudgetStatus(input) {
-  const root = await repositoryRoot(input.repositoryRoot)
-  return budgetView((await readBudget(root, input.chainId)).state)
-}
-
-function confirmedBudgetExtension(input) {
-  const confirmation = input.confirmation
-  const audit = confirmation?.auditEntry
-  const callback = confirmation?.callbackRequest
-  const payload = callback?.payload
-  const fields = ['files', 'tokenEstimate', 'durationMs']
-  if (!confirmation || confirmation.schemaVersion !== CONFIRMATION_SCHEMA || confirmation.status !== 'succeeded'
-    || audit?.schemaVersion !== 'confirm.audit-entry/1.0' || audit.risk !== 'low' || audit.answer !== 'approve'
-    || typeof audit.remembered !== 'boolean' || !Number.isFinite(Date.parse(audit.answeredAt))
-    || callback?.operation !== 'budget-extend' || payload?.answer !== 'approve'
-    || payload.chainId !== input.chainId || payload.requestId !== audit.requestId
-    || !payload.additions || fields.some((key) => payload.additions[key] !== input.additions?.[key])) {
-    fail('AIMLOCK_CONFIRMATION_REQUIRED', 'a low-risk Confirm Protocol interaction-answer bound to this chain and exact additions is required')
-  }
-  identifier(audit.actorId, 'actorId')
-  identifier(audit.requestId, 'requestId')
-  return identifier(audit.auditId, 'auditId')
-}
-
-async function extendReadBudget(input) {
-  const root = await repositoryRoot(input.repositoryRoot)
-  const confirmationId = confirmedBudgetExtension(input)
-  const additions = input.additions
-  if (!additions || !Number.isSafeInteger(additions.files) || additions.files < 0
-    || !Number.isSafeInteger(additions.tokenEstimate) || additions.tokenEstimate < 0
-    || !Number.isSafeInteger(additions.durationMs) || additions.durationMs < 0
-    || additions.files + additions.tokenEstimate + additions.durationMs === 0) {
-    fail('AIMLOCK_EXTENSION_INVALID', 'budget additions must contain a positive integer increase')
-  }
-  const chainId = identifier(input.chainId, 'chainId')
-  const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
-  return withFileLock(budgetPath, async () => {
-    const authority = await readBudget(root, chainId)
-    const state = authority.state
-    if (state.extensions.some((item) => item.confirmationId === confirmationId)) {
-      fail('AIMLOCK_CONFIRMATION_REPLAYED', 'this budget confirmation has already been applied')
-    }
-    const updated = {
-      ...state,
-      maxFiles: state.maxFiles + additions.files,
-      maxTokenEstimate: state.maxTokenEstimate === null && additions.tokenEstimate === 0
-        ? null : (state.maxTokenEstimate ?? 0) + additions.tokenEstimate,
-      maxDurationMs: state.maxDurationMs + additions.durationMs,
-      extensions: [...state.extensions, {
-        confirmationId,
-        additions,
-        at: new Date().toISOString(),
-      }],
-    }
-    await atomicJson(authority.path, updated)
-    await appendAudit(root, { event: 'read-budget-extended', chainId,
-      confirmationId, additions })
-    return budgetView(updated)
-  })
-}
-
 const LOCAL_CAPABILITIES = Object.freeze({
   schemaVersion: LOCAL_SCHEMA,
   operations: Object.freeze([
     'capabilities', 'probe', 'reassess', 'budget-init', 'budget-read', 'budget-status',
-    'budget-extend', 'gate-issue', 'gate-verify', 'guarded-write',
+    'budget-extend', 'budget-auto-renew-request', 'budget-auto-renew', 'budget-auto-renew-stop', 'gate-issue', 'gate-verify', 'guarded-write',
   ]),
   operationSchemas: LOCAL_OPERATION_SCHEMAS,
   writeBoundary: 'Only writes routed through guarded-write are physically intercepted. The IDE host must route batch writes through this runner.',
@@ -442,6 +275,9 @@ export {
   LOCAL_SCHEMA,
   PASS_SCHEMA,
   READ_BUDGETS,
+  authorizeReadBudgetRenewal,
+  requestReadBudgetRenewal,
+  stopReadBudgetRenewal,
   checkCachedReadAccess,
   extendReadBudget,
   guardedWriteFile,

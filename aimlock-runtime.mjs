@@ -209,7 +209,7 @@ const RESPONSE_SCHEMA = "aimlock.skill.response/1.1";
 const ERROR_SCHEMA = "aimlock.skill.error/1.0";
 const CONTRACT_SCHEMA = "aimlock.scope-contract/1.0";
 const COMPILER_NAME = "aimlock";
-const COMPILER_VERSION = "v7.0.35";
+const COMPILER_VERSION = "v7.0.36";
 const KEEP_ALIVE_SECONDS = 90;
 const KEEP_ALIVE_MESSAGE = "智能目标持续执行中，请勿关闭！";
 const BYPASS_LINE_BUDGET = 500;
@@ -1330,7 +1330,7 @@ async function executeRun(request) {
         localTrustedExecution: {
           requiredFor: ["filesystem-probe", "read-budget", "mutate-pass", "guarded-write", "autocoord-lease"],
           operations: ["capabilities", "probe", "reassess", "budget-init", "budget-read", "budget-status",
-            "budget-extend", "gate-issue", "gate-verify", "guarded-write"],
+            "budget-extend", "budget-auto-renew-request", "budget-auto-renew", "budget-auto-renew-stop", "gate-issue", "gate-verify", "guarded-write"],
           command: "cli-aimlock local <operation> <repositoryRoot>",
           schemaDiscovery: "cli-aimlock local capabilities <repositoryRoot>",
           boundary: "Only host writes routed through guarded-write are physically intercepted.",

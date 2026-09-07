@@ -23,7 +23,7 @@ When active, Aimlock uses Lock for one file through 500 changed lines and Probe 
 - 把需求锁成可执行目标，阻止思考漂移、执行漂移、范围膨胀
 - Bypass / Lock / Probe / Swarm 分档：小改绕过；深度修改才进入门禁
 - 改前文件快照，禁止创建 git 分支
-- Lock / Probe / Swarm 分别强制 3 / 10 / 30 个文件与 2 / 8 / 15 分钟读取预算；Probe、Swarm 另有限制 30K / 100K 估算 token
+- Lock / Probe / Swarm 分别强制 3 / 10 / 30 个文件与 2 / 8 / 60 分钟读取预算；Probe、Swarm 另有限制 30K / 100K 估算 token
 - Ed25519 写入凭证绑定 chainId、快照摘要、路径集合和最长 300 秒有效期
 - `probe.targetSymbols` 可从新鲜的 ContextBase 项目地图解析真实目标文件；缺失、歧义或陈旧条目直接阻断
 - 服务端按当前需求实时发现专项技能，只返回命中项；非计算需求不出现 Calctool
@@ -43,7 +43,7 @@ cli-aimlock local gate-issue .
 cli-aimlock local guarded-write .
 ```
 
-每个命令从 stdin 读取 JSON。读取预算使用进程间原子锁，耗尽后只允许执行、输出方案或明确阻塞；追加预算必须携带 Confirm Protocol 的低风险确认回执。无凭证写入仅豁免 `.aimlock/logs/` 与 `.aimlock/tmp/`。
+每个命令从 stdin 读取 JSON。读取预算使用进程间原子锁，耗尽后只允许执行、输出方案或明确阻塞；文件/token 追加预算必须携带 Confirm Protocol 的低风险确认回执。长任务可先用 `budget-auto-renew-request` 生成目标、路径、续期间隔与次数上限，再凭一次真实回执调用 `budget-auto-renew`；同任务后续只自动续时间，累计额度与每次续期保留审计。达到次数/文件/token 上限仍明确阻断。撤销或完成时调用 `budget-auto-renew-stop`；本地执行链成功也会关闭预算。无凭证写入仅豁免 `.aimlock/logs/` 与 `.aimlock/tmp/`。
 
 Swarm 模式下，`chain-plan` 会在 `swarm` 前插入 `coordinator.conflict-scan`。`gate-issue` 必须显式声明 `coordinationRequired`；为 true 时凭证绑定 `.coord/leases/` 中的签名文件锁，`guarded-write` 在同一拦截点同时校验门禁与活动租约。存在活动 `dependency-wait` 的 chain 会被 `budget-read` 拒绝。
 

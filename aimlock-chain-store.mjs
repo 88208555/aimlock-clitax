@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { atomicJson, ensureManagedDirectory, fail, identifier, repositoryRoot, resolvedProjectPath } from './aimlock-local-fs.mjs'
 import { STATE_SCHEMA, chainStatus, planDigest, validatePlan } from './aimlock-chain-model.mjs'
+import { completeReadBudgetIfExists } from './aimlock-read-budget-renewal.mjs'
 
 const LOCK_WAIT_MS = 2_000
 const LOCK_POLL_MS = 20
@@ -114,6 +115,7 @@ export async function saveExecution(file, state) {
   state.updatedAt = new Date().toISOString()
   state.status = chainStatus(state)
   await atomicJson(file, state)
+  if (state.status === 'succeeded') await completeReadBudgetIfExists(resolve(dirname(file), '../../..'), state.chainId)
 }
 
 export async function loadExecution(file) {
