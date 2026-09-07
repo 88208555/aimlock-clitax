@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { executeCoordinatorOperation } from 'cli-swarm/coordinator'
 import { loadOfficialSkillContext } from './installer.mjs'
-import { invokeOfficialSkill } from './broker.mjs'
+import { invokeOfficialSkill, recoverOfficialSkill } from './broker.mjs'
 import { fail, sha256 } from './aimlock-local-fs.mjs'
 import { errorRecord } from './aimlock-chain-model.mjs'
 import { saveExecution } from './aimlock-chain-store.mjs'
@@ -52,10 +52,12 @@ export async function callSkill(session, skillId, operation, input) {
     const invocation = await invokeOfficialSkill(context, operation, input, {
       environment: dependencies.environment, credentialAccess: dependencies.credentialAccess,
       request: async (url, options) => {
-        const request = JSON.parse(options.body).input
-        call.requestId = request.requestId
-        call.status = 'dispatched'
-        await saveExecution(session.file, session.state)
+        if (options.method === 'POST') {
+          const request = JSON.parse(options.body).input
+          call.requestId = request.requestId
+          call.status = 'dispatched'
+          await saveExecution(session.file, session.state)
+        }
         return dependencies.request(url, options)
       },
     })
@@ -102,4 +104,21 @@ export async function callCommand(session, input) {
     await failCall(session, call, error)
     throw error
   }
+}
+
+export async function recoverSkillCall(session, skillId) {
+  const call = session.record.calls.at(-1)
+  if (!call || call.kind !== 'skill' || !call.requestId || !['uncertain', 'dispatched', 'recorded'].includes(call.status)) {
+    fail('AIMLOCK_CHAIN_RECOVERY_INVALID', 'Only an uncertain skill request can be recovered by receipt query')
+  }
+  call.status = 'uncertain'
+  await saveExecution(session.file, session.state)
+  const invocation = await recoverOfficialSkill(skillContext(session.state, skillId),
+    call.operation, call.requestId, session.dependencies)
+  call.receipt = invocation
+  call.status = 'recorded'
+  call.error = null
+  call.completedAt = new Date().toISOString()
+  await saveExecution(session.file, session.state)
+  return invocation.response.output
 }

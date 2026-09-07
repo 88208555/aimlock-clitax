@@ -1,6 +1,7 @@
 import { stdin, stdout } from 'node:process'
 import { answerExecution, executionStatus, initializeExecution, resumeExecution } from './aimlock-chain-executor.mjs'
 import { errorRecord } from './aimlock-chain-model.mjs'
+import { createBrokerTransport } from './broker-transport.mjs'
 import { fail } from './aimlock-local-fs.mjs'
 
 const PLAN_MAX_BYTES = 1_048_576
@@ -29,7 +30,7 @@ export async function dispatchChain(args) {
   if (!Object.hasOwn(expected, operation) || args.length !== expected[operation]) {
     fail('AIMLOCK_CHAIN_USAGE_INVALID', CHAIN_USAGE)
   }
-  const dependencies = { environment: process.env, request: fetch }
+  const dependencies = { environment: process.env, request: createBrokerTransport({ environment: process.env }) }
   if (operation === 'init') return initializeExecution(repositoryRoot, await readPlan(stdin))
   if (operation === 'status') return executionStatus(repositoryRoot, chainId)
   if (operation === 'resume') return resumeExecution(repositoryRoot, chainId, dependencies)

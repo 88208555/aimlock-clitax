@@ -179,7 +179,7 @@ export function chainStatus(state) {
 export function errorRecord(error) {
   if (!(error instanceof Error)) return { name: 'ThrownValue', message: String(error) }
   const value = { name: error.name, message: error.message }
-  for (const key of ['code', 'transportCode', 'operation', 'retryable']) {
+  for (const key of ['code', 'transportCode', 'operation', 'requestId', 'stage', 'transport', 'recovery', 'receiptStatus', 'retryable']) {
     if (Object.hasOwn(error, key)) value[key] = error[key]
   }
   if (error.cause instanceof Error) value.cause = errorRecord(error.cause)

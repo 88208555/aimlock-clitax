@@ -4,7 +4,7 @@ import { fail } from './aimlock-local-fs.mjs'
 import { bindInput, errorRecord, validatePlan } from './aimlock-chain-model.mjs'
 import { assertNewExecution, executionStatus, initialState, loadExecution, recoverInterrupted,
   saveExecution, withExecutionLock } from './aimlock-chain-store.mjs'
-import { callCommand, callCoordinator, callSkill, resolveContexts, verifyContexts } from './aimlock-chain-calls.mjs'
+import { callCommand, callCoordinator, callSkill, recoverSkillCall, resolveContexts, verifyContexts } from './aimlock-chain-calls.mjs'
 import { answerPending, prepareHuman } from './aimlock-chain-human.mjs'
 import { skillOutcome } from './aimlock-chain-outcomes.mjs'
 
@@ -149,6 +149,20 @@ async function coordinatorStep(session, step, input) {
   }
 }
 
+function finishSkillStep(session, step, output) {
+    if (step.skillId === 'confirm-protocol' && step.operation === 'interaction-request' && output.status === 'succeeded') {
+      session.record.status = 'waiting'
+      session.record.output = output
+      session.record.pending = { kind: 'human', interaction: output.interaction, waitInput: null,
+        presentation: output.chatFallback, response: output,
+        continueWhen: Object.hasOwn(step, 'continueWhen') ? step.continueWhen : null }
+    } else {
+      const outcome = skillOutcome(step, output)
+      finish(session.record, output, outcome.status)
+      session.record.error = outcome.error
+    }
+}
+
 async function executeStep(session, step) {
   if (!await readyForWork(session, step)) return
   const input = bindInput(step, session.state)
@@ -164,17 +178,7 @@ async function executeStep(session, step) {
   } else if (step.kind === 'coordinator') await coordinatorStep(session, step, input)
   else {
     const output = await callSkill(session, step.skillId, step.operation, input)
-    if (step.skillId === 'confirm-protocol' && step.operation === 'interaction-request' && output.status === 'succeeded') {
-      session.record.status = 'waiting'
-      session.record.output = output
-      session.record.pending = { kind: 'human', interaction: output.interaction, waitInput: null,
-        presentation: output.chatFallback, response: output,
-        continueWhen: Object.hasOwn(step, 'continueWhen') ? step.continueWhen : null }
-    } else {
-      const outcome = skillOutcome(step, output)
-      finish(session.record, output, outcome.status)
-      session.record.error = outcome.error
-    }
+    finishSkillStep(session, step, output)
   }
   await saveExecution(session.file, session.state)
 }
@@ -186,6 +190,18 @@ async function advance(root, file, state, dependencies) {
     if (record.status === 'blocked' && step.kind === 'coordinator' && step.operation === 'lock-acquire'
       && record.output?.status === 'queued' && record.input) saveQueuePending(record, record.output, record.input)
     const session = { root, file, state, record, dependencies }
+    if (record.status === 'uncertain' && step.kind === 'skill'
+      && record.calls.at(-1)?.operation === step.operation) {
+      try {
+        finishSkillStep(session, step, await recoverSkillCall(session, step.skillId))
+        await saveExecution(file, state)
+      } catch (error) {
+        await failedStep(session, error)
+        return state
+      }
+      if (record.status === 'succeeded') continue
+      return state
+    }
     if (['failed', 'uncertain'].includes(record.status)) return state
     if (record.status === 'waiting' && record.pending?.kind === 'human') return state
     if (record.status === 'blocked' && record.pending?.kind !== 'coordination-guard') return state

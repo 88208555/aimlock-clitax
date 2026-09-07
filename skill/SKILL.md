@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.36
+Package version: v7.0.37
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -188,3 +188,9 @@ Aimlock returns the protocol; it does not start a timer.
 4. 运行 `npx cli-aimlock@latest brain check <repositoryRoot> <handoff.json>` 执行批准的检查并回传产物哈希和结果。普通 IDE 回传属于 client-reported，不能据此声称可信验证通过。
 5. 只有已批准的可信 runner 生成与本次计划和报告绑定的签名收据后，才运行 `npx cli-aimlock@latest brain validate <repositoryRoot> <validation.json>`。没有可信收据时保持已回传状态，不伪造验证。
 6. 请求发送后结果不确定时，先用 `brain status <repositoryRoot> <status.json>` 按 requestId 或 planId 查询；禁止自动重发规划或重复计费。
+
+## 网络中断与原回执恢复
+
+仅在 TLS 握手前确定尚未发送 HTTP 请求时，broker 才允许最多 3 次连接尝试，并受总超时约束。请求发出后发生断线或响应中断，只用 GET 查询原 requestId 的服务端回执，禁止重发 POST；未取得有效回执时保留不确定状态，不得假定成功或继续依赖步骤。
+
+`npx cli-aimlock@latest recover <operation> <requestId>` 可重新查询原调用，不会重做操作或重复计费。链恢复不会跳过人工确认，也不会自动重跑结果不确定的本地命令。代理连接需 Node.js 22.21+ 或 24.5+；不支持的运行时会明确报错。

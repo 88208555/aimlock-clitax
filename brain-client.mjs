@@ -4,6 +4,7 @@ import { inspectBrainTarget, brainStateDirectory, saveBrainRequest } from './bra
 export { inspectBrainTarget } from './brain-client-files.mjs'
 import { resolve } from 'node:path'
 import { brainClientAuthorization, transportFailureCode } from './broker.mjs'
+import { createBrokerTransport } from './broker-transport.mjs'
 import { executeCommand } from './aimlock-chain-process.mjs'
 
 export const BRAIN_ENDPOINT = 'https://cli.tax/api/v1/brain'
@@ -45,7 +46,7 @@ export async function invokeBrain(operation, input, dependencies = {}) {
   if (Buffer.byteLength(body) > MAX_INPUT_BYTES) throw new Error('Brain request exceeds the size limit')
   let response
   try {
-    response = await (dependencies.request ?? fetch)(endpoint, {
+    response = await (dependencies.request ?? createBrokerTransport({ environment }))(endpoint, {
       method: 'POST', redirect: 'error', headers: { Authorization: authorization, 'Content-Type': 'application/json' },
       body, signal: AbortSignal.timeout(TIMEOUT_MS),
     })
