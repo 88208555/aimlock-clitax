@@ -1,3 +1,4 @@
+import { decisionResumesTask, decisionTargetsTask } from 'cli-swarm/coordinator'
 import { randomUUID } from 'node:crypto'
 import { assertChainNotSuspended } from './aimlock-coordination.mjs'
 import { fail } from './aimlock-local-fs.mjs'
@@ -57,14 +58,13 @@ function finish(record, output, status) {
 
 async function stillWaiting(session, output, pending) {
   if (output.status === 'waiting') return true
-  const releasedByHuman = pending.decision?.status === 'resolved'
-    && pending.decision.answer === 'resume:' + pending.input.agentId
+  const releasedByHuman = pending.decision && decisionResumesTask(pending.decision, pending.input)
   if (output.status !== 'blocked' || (output.wakePackage?.reason !== 'event-received' && !releasedByHuman)) return false
   const current = (await callCoordinator(session, 'status', {})).state
   const task = current.tasks.find((item) => item.taskId === pending.input.taskId)
   if (!task || ['completed', 'failed', 'reclaimed'].includes(task.status)) return false
   return current.waits.some((wait) => wait.taskId === task.taskId && wait.status === 'active')
-    || current.decisions.some((decision) => decision.status === 'pending' && decision.agents.includes(task.agentId))
+    || current.decisions.some((decision) => decisionTargetsTask(decision, task) && decision.status === 'pending')
 }
 
 async function driveWait(session) {
@@ -80,8 +80,7 @@ async function driveWait(session) {
     await prepareHuman(session, output.confirmProtocolRequests[0].input.interaction, pending.input)
     return
   }
-  const releasedByHuman = pending.decision?.status === 'resolved'
-    && pending.decision.answer === 'resume:' + pending.input.agentId
+  const releasedByHuman = pending.decision && decisionResumesTask(pending.decision, pending.input)
     && output.status === 'resolved'
   if (releasedByHuman) {
     finish(session.record, { ...output, status: 'resolved-by-human',

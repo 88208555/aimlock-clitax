@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.37
+Package version: v7.0.38
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -129,7 +129,7 @@ Call `interrupt` before acting on an interruption:
 - forced stop → `stop`;
 - status query → `status`;
 - related addition → `fuse`;
-- unrelated request → `spawn`.
+- unrelated request → first query existing task ownership through `tasks message-route`; reuse its owner when resolved. Unresolved work remains a recorded pending request. Legacy `spawn` is a recommendation only and must not replace the current goal or create an unauthorized conversation.
 
 For an active incomplete goal, the caller sends exactly every 90 seconds:
 
@@ -194,3 +194,13 @@ Aimlock returns the protocol; it does not start a timer.
 仅在 TLS 握手前确定尚未发送 HTTP 请求时，broker 才允许最多 3 次连接尝试，并受总超时约束。请求发出后发生断线或响应中断，只用 GET 查询原 requestId 的服务端回执，禁止重发 POST；未取得有效回执时保留不确定状态，不得假定成功或继续依赖步骤。
 
 `npx cli-aimlock@latest recover <operation> <requestId>` 可重新查询原调用，不会重做操作或重复计费。链恢复不会跳过人工确认，也不会自动重跑结果不确定的本地命令。代理连接需 Node.js 22.21+ 或 24.5+；不支持的运行时会明确报错。
+
+## 新消息归属与原任务连续性
+
+多任务协作时先登记任务目标、原始验收项和宿主定位；每条用户新需求在执行前使用 [task-routing.md](references/task-routing.md) 的 `task-describe → message-route → message-accept → task-resume` 协议。先查已有任务归属，再决定当前任务补充、转交、歧义暂存或显式接手。同一条消息的独立需求分别路由，不能用新消息覆盖原目标。
+
+转交只是消息状态，不等于原任务完成。接收方按 requestId 去重，只有持久接收回执才算接手；来源任务继续不依赖该交接的工作。退出、上下文压缩或宿主重启后，必须先读取 `task-resume` 恢复原目标、检查点、未完成项与待投递请求。
+
+用户明确要求在当前任务处理时，保留原目标；已由其他任务负责的范围需 `handoff-release` 完成安全交接，再重新验证 Aimlock 范围、快照与写入权限。禁止把别人的签名租约、预算或通过证据当作当前任务的新授权。归属不明只暂存新需求，不暂停原任务。
+
+这些操作使用同一协调根目录的持久台账。宿主必须在新消息入口调用并消费结果；技能不能拦截未接入的 IDE，也不会自动创建会话、Git 分支、常驻服务或跨机器复制私密消息。

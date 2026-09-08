@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { TASKS_USAGE, runTasksCli } from './aimlock-tasks-cli.mjs'
 import { realpathSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { cwd, stdin, stdout } from 'node:process'
@@ -95,7 +96,7 @@ export function localAimlockApplicability(facts) {
 export function aimlockUsage(context) {
   const usage = defaultUsage(context)
   if (!usage.includes(COMMON_RUN_USAGE)) throw new Error('Shared CLI run usage contract changed')
-  return usage.replace(COMMON_RUN_USAGE, AIMLOCK_RUN_USAGE) + '\n\n' + CHAIN_USAGE
+  return usage.replace(COMMON_RUN_USAGE, AIMLOCK_RUN_USAGE) + '\n\n' + CHAIN_USAGE + '\n\n' + TASKS_USAGE
     + '\n\nRead-time renewal: local budget-auto-renew-request <repositoryRoot> prepares one Confirm Protocol approval;'
     + '\nlocal budget-auto-renew activates the approved chain/scope/policy; budget-auto-renew-stop revokes or completes it.'
 }
@@ -196,6 +197,8 @@ const cliPath = fileURLToPath(import.meta.url)
 if (process.argv[1] && realpathSync(resolve(process.argv[1])) === cliPath) {
   if (process.argv[2] === 'brain') {
     await runBrainCli(process.argv.slice(3))
+  } else if (process.argv[2] === 'tasks') {
+    await runTasksCli(process.argv.slice(3))
   } else if (process.argv[2] === 'chain') {
     await runChainCli(process.argv.slice(3))
   } else if (process.argv[2] === 'local') {

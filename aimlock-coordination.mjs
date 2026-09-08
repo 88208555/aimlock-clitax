@@ -1,3 +1,4 @@
+import { decisionResumesTask, decisionTargetsTask } from 'cli-swarm/coordinator'
 import { verify } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
@@ -35,9 +36,9 @@ function failureHandled(task, tasks, inspected = new Set()) {
 
 function parkedAfterDecision(task, tasks, decisions) {
   if (task.status !== 'blocked' || task.blockedReason !== 'human-decision') return false
-  const decision = decisions.findLast((item) => item.agents.includes(task.agentId))
+  const decision = decisions.findLast((item) => decisionTargetsTask(item, task))
   return decision?.status === 'resolved'
-    && tasks.some((active) => active.status === 'active' && decision.answer === 'resume:' + active.agentId)
+    && tasks.some((active) => active.status === 'active' && decisionResumesTask(decision, active))
 }
 
 function assertChainRunnable(state, chainId) {
@@ -46,7 +47,7 @@ function assertChainRunnable(state, chainId) {
   const wait = state.waits.find((item) => item.chainId === chainId && item.status === 'active')
   if (wait) fail('AIMLOCK_COORDINATION_WAITING', 'chain ' + chainId + ' is suspended until ' + wait.event + ' or ' + wait.deadlineAt)
   const pending = state.decisions.some((decision) => decision.status === 'pending'
-    && tasks.some((task) => decision.agents.includes(task.agentId)))
+    && tasks.some((task) => decisionTargetsTask(decision, task)))
   const unresolved = tasks.some((task) => ['failed', 'reclaimed'].includes(task.status)
     && !failureHandled(task, tasks))
   if (!tasks.some((task) => task.status === 'active') || pending || unresolved
