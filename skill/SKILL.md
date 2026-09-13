@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.38
+Package version: v7.0.39
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -63,10 +63,10 @@ Only after the applicability gate activates Aimlock:
 
 1. Call local `capabilities`, then `probe`; use only its filesystem, Git-history, package-boundary, and import-graph facts for the initial mode. Exact `targetSymbols` may resolve through a fresh ContextBase map; missing, ambiguous, or stale map entries block.
 2. Call remote `capabilities`, `intake`, and `classify`. A fallback `bypass` response stops the Aimlock chain.
-3. Call `scope-contract`; empty allowed paths are blocked. Initialize the mode's local read budget before exploration.
+3. Call `scope-contract`; empty allowed paths are blocked. Initialize the mode's local read budget before exploration. For expected long work, request the exact bounded renewal policy now, before deep reads; reuse the actual approval rather than asking again after each interval.
 4. Route every source read through local `budget-read`. File/token exhaustion requires `execute`, `plan`, or `blocked`, or an exact Confirm Protocol budget extension. Time may renew automatically only after the one-time task-bound approval described below.
 5. Call `skill-route`. The server queries the current published official directory and injects only matched skills.
-6. For Probe or Swarm, workers inspect read-only and return modification nodes. Lock stays on the current agent.
+6. The current agent inspects and proposes modification nodes in every mode. Delegate read-only inspection only when the shared business-necessity gate passes; Probe/Swarm mode never requires creating workers.
 7. Call `propose-nodes`, `accept-nodes`, `snapshot-plan`, and `snapshot-verify` in order.
 8. Issue a local signed mutation pass after `mutate-gate` permits the verified snapshot. Route each batch write through local `guarded-write` with the same chainId and pass.
 9. If actual files or changed lines exceed the contract budget, call local `reassess`; upgrade only one level and preserve the current snapshot, changes, and evidence. Tell the user when this occurs.
@@ -87,7 +87,7 @@ Required routing facts include `mode`, `goalKind`, `risk`, `contractUnclear`, bl
 - Confirm Protocol: when a structured user decision is required, and always for high-risk work even if the caller sends a false hint.
 - ArchGuard: only for code/mixed work in a new project or under an existing architecture contract.
 - Blueprint: only for active Probe/Swarm work when `contractUnclear=true` and no blueprint exists.
-- Swarm: only for active Swarm mode.
+- Swarm: only for active Swarm mode; use its task and coordination rules locally. A matched skill is not a requirement to spawn agents.
 - Validator: only for high-risk work or an explicit final-validation requirement.
 - MergeGuard: only for an explicit verified-merge requirement.
 - User-named extras are analysis candidates until their own `capabilities` prove a match.
@@ -166,7 +166,7 @@ Aimlock returns the protocol; it does not start a timer.
 ## 受限调用与自动评价闭环
 
 - IDE / 智能体必须通过本包 `invoke` 或 JSON-stdin `broker` 调用，不得直接拼装技能 HTTP 请求，也不得读取 BrainClient token。
-- broker 从 `CLITAX_BRAIN_CLIENT_TOKEN_FILE` 读取身份；macOS/Linux 文件必须为当前 broker 账户所有且权限 `0600`，Windows 文件必须位于受限 `%LOCALAPPDATA%\CLI.Tax\broker` 目录。
+- broker 默认读取账号共享凭据文件；显式 `CLITAX_BRAIN_CLIENT_TOKEN_FILE` 使用绝对路径覆盖；macOS/Linux 文件必须为当前 broker 账户所有且权限 `0600`，Windows 文件必须位于受限 `%LOCALAPPDATA%\CLI.Tax\broker` 目录。
 - broker 只需要 Brain Client HTTPS、受限身份文件和调用方显式传入的路径，本身不需要完整磁盘访问。若要保证 IDE 无法读取身份文件，必须把 broker 放进独立低权限系统账户或沙箱服务，并只暴露受限 IPC；broker 与 IDE 同账户运行时，`0600` 不能隔离二者，禁止声称令牌已隔离。
 - broker 只用 `Authorization: BrainClient …` 发起一次 runtime 请求。HTTP 成功后必须保留响应顶层原始 `feedbackReceiptId`、`feedbackInvocationId` 和 `feedbackEvaluation.digest`，不得生成、猜测、复用或跨调用转移。
 - Brain Client 服务端必须严格绑定请求/响应的 `requestId` 和 `schemaVersion`，再根据真实状态、验证结果、服务端耗时与 findings 生成并持久化权威评分、评语和摘要。broker 不得生成分数或评语。
@@ -204,3 +204,32 @@ Aimlock returns the protocol; it does not start a timer.
 用户明确要求在当前任务处理时，保留原目标；已由其他任务负责的范围需 `handoff-release` 完成安全交接，再重新验证 Aimlock 范围、快照与写入权限。禁止把别人的签名租约、预算或通过证据当作当前任务的新授权。归属不明只暂存新需求，不暂停原任务。
 
 这些操作使用同一协调根目录的持久台账。宿主必须在新消息入口调用并消费结果；技能不能拦截未接入的 IDE，也不会自动创建会话、Git 分支、常驻服务或跨机器复制私密消息。
+
+## 执行完整性共同规则
+
+1. 工程目标、已接受范围和验收项必须持久化；新增需求先路由与合并，不能覆盖原目标。子任务有明确服务目标的理由，执行仅用本链已匹配技能。每次恢复读取 task-resume，核对剩余项、pending请求和continuationNotifications。
+2. 默认由主代理完成工作，禁止为了省事创建子代理、把简单查找/改名/少量修改/单条命令/例行检查/汇总交接给多智能体，禁止为达到门槛拆分或夸大任务。启用Aimlock或Swarm模式不是创建授权，管理/运维/安全/协调是主代理职责，不额外创建常驻智能体。只有业务确需独立且实质性的交付、主代理同时有可推进的独立工作、预期收益严格高于上下文传递/协调/验收成本时才派单；复用已有合适负责人，用户禁止委派时不得创建。每次创建前记录业务理由、交付物、验收项、主代理工作、成本收益、精确路径和原负责人；只创建当前需要的最少数量，不预建空闲角色，不递归扩编或重复扫描。规模门槛200行/3文件/跨模块仅为必要条件，不能单独证明值得委派。主代理负责整合和完整验收，不把半成品当完成；预算抱怨不是停止指令。
+3. 自报、回复送达和动作完成不等于工程交付验证。reported始终待验收；Swarm接受工程任务时复用Validator校验签名、有效期、计划/产物/任务绑定。无证据、伪造runner或失败检查不得成为绿色完成。
+4. 原任务交接前保存检查点并释放旧锁；回程只发持久通知，宿主消费后重新核验基线、快照与写入权限。历史恢复结果不是新授权。技能不能自行唤醒未接入的IDE。
+5. 心跳停止仅允许自动回收尚未开工的assigned任务；claimed/running进入执行结果待核对状态，禁止盲目重复执行。已回传、已验收、失败和取消任务不会被自动重派。服务器停滞回收同时保存会员通知，对话界面定期读取展示。
+6. 预计长任务在预算初始化后、深读前提出一次精确自动续时策略；只有真实授权才自动续时。时间、文件数、token和写入权限分别计量；额度/次数耗尽、撤销和完成必须明确停止并说明下一步。读取预算不是付费充值，计时器由宿主运行。
+7. 云端沙箱开关按调用会员读取；关闭时仅允许当前受审官方源码摘要在受控worker中直接执行，并记录executionIsolation。未知或修改过的源码明确要求sandbox，不伪造隔离结果；worker直接执行不是OS沙箱。
+8. 使用技能前检查官方发布版本并自动升级可管理的安装副本与客户端；配置失败或升级失败停止并报告。通过configure的JSON标准输入导入一次账号凭据，后续项目/分支/任务共享；密钥不进入源码、URL或命令参数。显式环境覆盖必须是绝对路径。网页复制在点击时获取当前凭据，页面仅展示无密钥地址；已撤销密钥没有权限自动获取新密钥，需已认证网页重新同步一次。
+
+English: keep simple work with the main agent. Delegate only substantial independent business deliverables when benefits exceed coordination costs; use the fewest needed agents, never create idle management agents. Enabling Aimlock does not authorize delegation. Finish all authorized work; a cost complaint is not a stop request. Preserve the original goal; verify execution evidence; resume from durable checkpoints; never replay uncertain side effects. Read-time renewal requires bounded approval. Reuse account credentials and check managed skill updates before use; revoked credentials require an authenticated refresh.
+
+Русский: сохраняйте исходную цель, проверяйте доказательства выполнения и возобновляйте работу из сохранённой точки. Не повторяйте операции с неизвестным результатом. Продление чтения требует ограниченного разрешения; ключи учётной записи используются повторно, обновления навыков проверяются перед вызовом.
+
+## 账号共享凭据与自动更新
+
+在已登录的能力市场复制安装入口，将内容粘贴给 IDE。页面只展示原地址，剪贴板会携带当前账号凭据。IDE 将四字段凭据 JSON 经标准输入交给 `npx cli-aimlock@latest configure`；不要放到命令参数、项目文件或日志中。一次配置供同一操作系统账号的所有项目、分支和任务使用，八个技能共享同一文件。
+
+默认位置：macOS 为 `~/Library/Application Support/CLI.Tax/broker/credential.json`，Linux 为 `~/.local/share/CLI.Tax/broker/credential.json`，Windows 为 `%LOCALAPPDATA%\CLI.Tax\broker\credential.json`。显式 `CLITAX_BRAIN_CLIENT_TOKEN_FILE` 仍按绝对路径覆盖默认位置；迁移旧 IDE 配置时移除其过时覆盖，再使用账号共享文件。macOS/Linux 校验当前账号所有权和0600权限；Windows校验仅当前账号与SYSTEM可访问的ACL。
+
+每次新技能调用先查询官方发布版本，精确版本下载并校验身份后自动使用；更新已托管的当前项目与账号技能目录，失败恢复旧目录，禁止覆盖 Git 跟踪源码或未托管内容。升级返回 `upgrade.reloadRequired` 和说明路径时，IDE 应读取更新后的 SKILL.md、核对本任务合同再继续。install/check同样自动更新，不需要每次人工发升级指令。查询不确定调用的原回执不升级、不重发操作。
+
+升级不会清除账号凭据；各调用重新读取共享文件，因此重新同步一次密钥后所有任务使用新值。已撤销或失效的密钥不能为自己取得新权限，必须从已认证网页重新同步一次。两个不同操作系统账号不共享私密文件。
+
+English: configure once using JSON stdin; all tasks under the same OS account reuse the credential. Each new invocation checks and updates the official package and managed documentation. Reload updated instructions when indicated. Revoked keys require a fresh authenticated copy.
+
+Русский: настройте ключ один раз через JSON stdin для всех задач пользователя ОС. Перед новым вызовом пакет и управляемые инструкции обновляются автоматически. Отозванный ключ требует повторной синхронизации с авторизованной страницы.

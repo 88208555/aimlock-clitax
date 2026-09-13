@@ -1,3 +1,7 @@
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { loadOfficialSkillContext } from './installer.mjs'
+import { prepareOfficialSkillUse, withUpgradeMetadata } from './official-skill-update.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { inspectBrainTarget, brainStateDirectory, saveBrainRequest } from './brain-client-files.mjs'
@@ -38,6 +42,14 @@ function exact(value, keys, label) {
 
 export async function invokeBrain(operation, input, dependencies = {}) {
   if (!OPERATIONS.has(operation)) throw new Error('Unknown Brain operation')
+  let upgrade = null
+  if (operation !== 'status') {
+    const context = loadOfficialSkillContext(dirname(fileURLToPath(import.meta.url)))
+    const prepared = await prepareOfficialSkillUse(context, 'brain-client.mjs', dependencies)
+    if (prepared.module !== null) return withUpgradeMetadata(
+      await prepared.module.invokeBrain(operation, input, dependencies), prepared.upgrade)
+    upgrade = prepared.upgrade
+  }
   const endpoint = dependencies.endpoint ?? BRAIN_ENDPOINT
   const context = { endpoint, displayName: 'Brain planning' }
   const environment = dependencies.environment ?? process.env
@@ -68,7 +80,7 @@ export async function invokeBrain(operation, input, dependencies = {}) {
   if (payload.plan !== null && (payload.plan?.schemaVersion !== PLAN_SCHEMA
     || payload.plan.planId !== payload.planId || !HASH_PATTERN.test(payload.planDigest)
     || brainClientDigest(payload.plan) !== payload.planDigest)) throw new Error('Brain response plan digest is invalid')
-  return payload
+  return upgrade === null ? payload : withUpgradeMetadata(payload, upgrade)
 }
 
 export async function prepareBrainRequest(root, specification) {

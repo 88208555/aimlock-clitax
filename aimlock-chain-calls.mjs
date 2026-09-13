@@ -30,7 +30,7 @@ function skillContext(state, skillId) {
 
 async function startCall(session, kind, operation, input) {
   const call = { callId: 'call-' + randomUUID(), kind, operation, inputDigest: sha256(JSON.stringify(input)),
-    requestId: null, status: 'started', pid: null, receipt: null, error: null,
+    requestId: null, requestSchemaVersion: null, status: 'started', pid: null, receipt: null, error: null,
     startedAt: new Date().toISOString(), completedAt: null }
   session.record.calls.push(call)
   await saveExecution(session.file, session.state)
@@ -51,10 +51,12 @@ export async function callSkill(session, skillId, operation, input) {
     const dependencies = session.dependencies
     const invocation = await invokeOfficialSkill(context, operation, input, {
       environment: dependencies.environment, credentialAccess: dependencies.credentialAccess,
+      workingDirectory: session.root, homeDirectory: dependencies.homeDirectory,
       request: async (url, options) => {
         if (options.method === 'POST') {
           const request = JSON.parse(options.body).input
           call.requestId = request.requestId
+          call.requestSchemaVersion = request.schemaVersion
           call.status = 'dispatched'
           await saveExecution(session.file, session.state)
         }
@@ -113,7 +115,13 @@ export async function recoverSkillCall(session, skillId) {
   }
   call.status = 'uncertain'
   await saveExecution(session.file, session.state)
-  const invocation = await recoverOfficialSkill(skillContext(session.state, skillId),
+  const context = skillContext(session.state, skillId)
+  // Legacy calls used the initialized context; new calls persist the schema actually sent before POST.
+  const schemaVersion = Object.hasOwn(call, 'requestSchemaVersion') ? call.requestSchemaVersion : context.schemaVersion
+  if (typeof schemaVersion !== 'string' || !/^[a-z-]+\.skill\.request\/\d+\.\d+$/.test(schemaVersion)) {
+    fail('AIMLOCK_CHAIN_RECOVERY_INVALID', 'Dispatched request schema is missing or invalid')
+  }
+  const invocation = await recoverOfficialSkill({ ...context, schemaVersion },
     call.operation, call.requestId, session.dependencies)
   call.receipt = invocation
   call.status = 'recorded'
