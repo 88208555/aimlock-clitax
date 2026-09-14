@@ -16,6 +16,7 @@ import {
   extendReadBudget,
   guardedWriteFile,
   initializeReadBudget,
+  configureReadBudgetContext,
   issueMutationPass,
   probeRepositoryDemand,
   readBudgetStatus,
@@ -172,6 +173,7 @@ async function runLocalOperation(operation, repositoryRoot, input) {
   if (operation === 'probe') return probeRepositoryDemand(scoped)
   if (operation === 'reassess') return reassessMode(input)
   if (operation === 'budget-init') return initializeReadBudget(scoped)
+  if (operation === 'budget-context') return configureReadBudgetContext(scoped)
   if (operation === 'budget-read') return readFileWithinBudget(scoped)
   if (operation === 'budget-status') return readBudgetStatus(scoped)
   if (operation === 'budget-extend') return extendReadBudget(scoped)

@@ -20,10 +20,11 @@ import {
   verifyMutationPassFile,
 } from './aimlock-local-gate.mjs'
 import { resolveContextMapTargets } from './aimlock-context-map.mjs'
-import { BUDGET_SCHEMA, TOKEN_ESTIMATE_ALGORITHM, READ_BUDGETS, initializeReadBudget } from './aimlock-read-budget-state.mjs'
+import { BUDGET_SCHEMA, TOKEN_ESTIMATE_ALGORITHM, READ_BUDGETS,
+  initializeReadBudget, configureReadBudgetContext } from './aimlock-read-budget-state.mjs'
 import { checkCachedReadAccess, extendReadBudget, readBudgetStatus, readFileWithinBudget } from './aimlock-read-budget.mjs'
 import { authorizeReadBudgetRenewal, requestReadBudgetRenewal, stopReadBudgetRenewal } from './aimlock-read-budget-renewal.mjs'
-import { AUTO_RENEW_OPERATION_SCHEMAS } from './aimlock-read-budget-schemas.mjs'
+import { AUTO_RENEW_OPERATION_SCHEMAS, EXECUTION_CONTEXT_SCHEMA } from './aimlock-read-budget-schemas.mjs'
 
 const execFile = promisify(execFileCallback)
 const MAX_DISCOVERED_FILES = 1_000
@@ -63,7 +64,10 @@ const LOCAL_OPERATION_SCHEMAS = Object.freeze({
     currentMode: { enum: ['lock', 'probe', 'swarm'] }, actualFileCount: { type: 'integer', minimum: 1 },
     actualChangedLines: { type: 'integer', minimum: 0 }, crossModule: { type: 'boolean' },
     needParallel: { type: 'boolean' }, inherited: objectValueSchema }),
-  'budget-init': schema(['chainId', 'mode'], { chainId: stringSchema, mode: { enum: ['lock', 'probe', 'swarm'] } }),
+  'budget-init': schema(['chainId', 'mode', 'executionContext'], { chainId: stringSchema,
+    mode: { enum: ['lock', 'probe', 'swarm'] }, executionContext: EXECUTION_CONTEXT_SCHEMA }),
+  'budget-context': schema(['chainId', 'executionContext'], {
+    chainId: stringSchema, executionContext: EXECUTION_CONTEXT_SCHEMA }),
   'budget-read': schema(['chainId', 'path'], { chainId: stringSchema, path: stringSchema }),
   'budget-status': schema(['chainId'], { chainId: stringSchema }),
   'budget-extend': schema(['chainId', 'confirmation', 'additions'], {
@@ -258,13 +262,14 @@ function reassessMode(input) {
 const LOCAL_CAPABILITIES = Object.freeze({
   schemaVersion: LOCAL_SCHEMA,
   operations: Object.freeze([
-    'capabilities', 'probe', 'reassess', 'budget-init', 'budget-read', 'budget-status',
+    'capabilities', 'probe', 'reassess', 'budget-init', 'budget-context', 'budget-read', 'budget-status',
     'budget-extend', 'budget-auto-renew-request', 'budget-auto-renew', 'budget-auto-renew-stop', 'gate-issue', 'gate-verify', 'guarded-write',
   ]),
   operationSchemas: LOCAL_OPERATION_SCHEMAS,
   writeBoundary: 'Only writes routed through guarded-write are physically intercepted. The IDE host must route batch writes through this runner.',
   coordinationBoundary: 'Active dependency waits block budgeted reads; coordinated gate passes bind signed .coord file leases.',
   tokenEstimateAlgorithm: TOKEN_ESTIMATE_ALGORITHM,
+  budgetApplicability: 'Read quotas apply only when executionContext confirms cloudSandboxEnabled=true and executionIsolation=sandbox; local and direct work continue automatically.',
   budgets: READ_BUDGETS,
 })
 
@@ -279,6 +284,7 @@ export {
   requestReadBudgetRenewal,
   stopReadBudgetRenewal,
   checkCachedReadAccess,
+  configureReadBudgetContext,
   extendReadBudget,
   guardedWriteFile,
   initializeReadBudget,

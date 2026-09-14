@@ -2,6 +2,15 @@ import { RENEWAL_LIMITS } from './aimlock-read-budget-renewal.mjs'
 
 const stringSchema = { type: 'string', minLength: 1 }
 const objectSchema = (required, properties) => ({ type: 'object', additionalProperties: false, required, properties })
+const EXECUTION_CONTEXT_SCHEMA = { oneOf: [
+  objectSchema(['executionIsolation'], { executionIsolation: { const: 'local' } }),
+  objectSchema(['executionIsolation', 'cloudSandboxEnabled'], {
+    executionIsolation: { const: 'direct' }, cloudSandboxEnabled: { type: 'boolean' },
+  }),
+  objectSchema(['executionIsolation', 'cloudSandboxEnabled'], {
+    executionIsolation: { const: 'sandbox' }, cloudSandboxEnabled: { const: true },
+  }),
+] }
 const scopeSchema = objectSchema(['goal', 'allowedPaths'], { goal: stringSchema,
   allowedPaths: { type: 'array', minItems: 1, items: stringSchema } })
 const policySchema = objectSchema(['intervalMs', 'maxRenewals'], {
@@ -28,4 +37,4 @@ const AUTO_RENEW_OPERATION_SCHEMAS = Object.freeze({
   'budget-auto-renew-stop': objectSchema(['chainId', 'reason'], { chainId: stringSchema, reason: { enum: ['revoked', 'completed'] } }),
 })
 
-export { AUTO_RENEW_OPERATION_SCHEMAS }
+export { AUTO_RENEW_OPERATION_SCHEMAS, EXECUTION_CONTEXT_SCHEMA }

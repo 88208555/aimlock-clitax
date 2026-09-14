@@ -3,7 +3,7 @@ import { relative } from 'node:path'
 import { LOCAL_SCHEMA, appendAudit, atomicJson, fail, identifier, managedPath,
   repositoryRoot, resolvedProjectPath, safeRelativePath, withFileLock } from './aimlock-local-fs.mjs'
 import { assertChainNotSuspended } from './aimlock-coordination.mjs'
-import { readBudget, budgetView } from './aimlock-read-budget-state.mjs'
+import { readBudget, budgetView, assertCloudReadBudget } from './aimlock-read-budget-state.mjs'
 import { assertReadBudgetActive, assertRenewalScope, renewReadBudgetTime } from './aimlock-read-budget-renewal.mjs'
 
 const CONFIRMATION_SCHEMA = 'confirm-protocol.skill.response/1.0'
@@ -19,8 +19,10 @@ async function readFileWithinBudget(input) {
     let state = authority.state
     await assertReadBudgetActive(root, state)
     const before = budgetView(state)
+    const enforced = before.enforcement === 'cloud-sandbox'
     const isNew = !state.uniqueFiles.includes(path)
-    if (isNew && before.remainingFiles === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read file budget exhausted')
+    const isMeteredNew = !state.meteredFiles.includes(path)
+    if (enforced && isMeteredNew && before.remainingFiles === 0) fail('AIMLOCK_DECISION_REQUIRED', 'read file budget exhausted')
     const projectFile = await resolvedProjectPath(root, path)
     if (!projectFile.status.isFile()) fail('AIMLOCK_READ_NOT_FILE', `${path} is not a file`)
     assertRenewalScope(state, path, relative(root, projectFile.target).split('\\').join('/'))
@@ -35,9 +37,11 @@ async function readFileWithinBudget(input) {
       uniqueFiles: isNew ? [...state.uniqueFiles, path] : state.uniqueFiles,
       readCalls: state.readCalls + 1,
       tokenEstimate: state.tokenEstimate + tokenEstimate,
+      meteredFiles: enforced && isMeteredNew ? [...state.meteredFiles, path] : state.meteredFiles,
+      meteredTokenEstimate: state.meteredTokenEstimate + (enforced ? tokenEstimate : 0),
     }
     await atomicJson(authority.path, updated)
-    await appendAudit(root, { event: 'read-consumed', chainId, path, tokenEstimate })
+    await appendAudit(root, { event: 'read-consumed', chainId, path, tokenEstimate, enforcement: before.enforcement })
     return { schemaVersion: LOCAL_SCHEMA, path, content, budget: budgetView(updated) }
   })
 }
@@ -57,7 +61,10 @@ async function checkCachedReadAccess(input) {
     if (!state.uniqueFiles.includes(path)) fail('AIMLOCK_CACHE_UNCHARGED', 'cached source was not read by this chain')
     const projectFile = await resolvedProjectPath(root, path)
     assertRenewalScope(state, path, relative(root, projectFile.target).split('\\').join('/'))
-    return { schemaVersion: LOCAL_SCHEMA, path,
+    if (budget.enforcement === 'cloud-sandbox' && !state.meteredFiles.includes(path)) {
+      return { schemaVersion: LOCAL_SCHEMA, path, access: 'read-required', budget }
+    }
+    return { schemaVersion: LOCAL_SCHEMA, path, access: 'granted',
       budget: budgetView(await renewReadBudgetTime(root, authority, path)) }
   })
 }
@@ -88,20 +95,21 @@ function confirmedBudgetExtension(input) {
 
 async function extendReadBudget(input) {
   const root = await repositoryRoot(input.repositoryRoot)
-  const confirmationId = confirmedBudgetExtension(input)
-  const additions = input.additions
-  if (!additions || !Number.isSafeInteger(additions.files) || additions.files < 0
-    || !Number.isSafeInteger(additions.tokenEstimate) || additions.tokenEstimate < 0
-    || !Number.isSafeInteger(additions.durationMs) || additions.durationMs < 0
-    || additions.files + additions.tokenEstimate + additions.durationMs === 0) {
-    fail('AIMLOCK_EXTENSION_INVALID', 'budget additions must contain a positive integer increase')
-  }
   const chainId = identifier(input.chainId, 'chainId')
   const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
   return withFileLock(budgetPath, async () => {
     const authority = await readBudget(root, chainId)
     const state = authority.state
     await assertReadBudgetActive(root, state)
+    assertCloudReadBudget(state)
+    const confirmationId = confirmedBudgetExtension(input)
+    const additions = input.additions
+    if (!additions || !Number.isSafeInteger(additions.files) || additions.files < 0
+      || !Number.isSafeInteger(additions.tokenEstimate) || additions.tokenEstimate < 0
+      || !Number.isSafeInteger(additions.durationMs) || additions.durationMs < 0
+      || additions.files + additions.tokenEstimate + additions.durationMs === 0) {
+      fail('AIMLOCK_EXTENSION_INVALID', 'budget additions must contain a positive integer increase')
+    }
     if (state.extensions.some((item) => item.confirmationId === confirmationId)) {
       fail('AIMLOCK_CONFIRMATION_REPLAYED', 'this budget confirmation has already been applied')
     }

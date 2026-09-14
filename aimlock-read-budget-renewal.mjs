@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { relative } from 'node:path'
 import { appendAudit, atomicJson, fail, identifier, managedPath, repositoryRoot,
   resolvedProjectPath, safeRelativePath, sha256, withFileLock } from './aimlock-local-fs.mjs'
-import { readBudget, budgetView, requiredRenewalIntervals } from './aimlock-read-budget-state.mjs'
+import { readBudget, budgetView, requiredRenewalIntervals, assertCloudReadBudget } from './aimlock-read-budget-state.mjs'
 
 const RENEWAL_SCHEMA = 'aimlock.read-budget-auto-renew/1.0'
 const MIN_INTERVAL_MS = 60_000
@@ -44,10 +44,11 @@ function renewalQuestion(terms) {
 }
 
 async function requestReadBudgetRenewal(input) {
-  const terms = renewalTerms(input)
   const root = await repositoryRoot(input.repositoryRoot)
-  const { state } = await readBudget(root, terms.chainId)
+  const { state } = await readBudget(root, input.chainId)
   await assertReadBudgetActive(root, state)
+  assertCloudReadBudget(state)
+  const terms = renewalTerms(input)
   const requestId = identifier(input.requestId, 'requestId')
   return { schemaVersion: 'confirm.interaction/1.0', requestId, type: 'confirm',
     question: renewalQuestion(terms), options: [{ id: 'approve', label: 'Approve' }, { id: 'decline', label: 'Decline' }],
@@ -76,13 +77,15 @@ function renewalReceipt(input, terms) {
 }
 
 async function authorizeReadBudgetRenewal(input) {
-  const terms = renewalTerms(input)
-  const receipt = renewalReceipt(input, terms)
   const root = await repositoryRoot(input.repositoryRoot)
-  const budgetPath = managedPath(root, 'runs', terms.chainId, 'read-budget.json')
+  const chainId = identifier(input.chainId, 'chainId')
+  const budgetPath = managedPath(root, 'runs', chainId, 'read-budget.json')
   return withFileLock(budgetPath, async () => {
-    const { state } = await readBudget(root, terms.chainId)
+    const { state } = await readBudget(root, chainId)
     await assertReadBudgetActive(root, state)
+    assertCloudReadBudget(state)
+    const terms = renewalTerms(input)
+    const receipt = renewalReceipt(input, terms)
     if (state.autoRenew) {
       const replayed = state.autoRenew.confirmationId === receipt.confirmationId
       fail(replayed ? 'AIMLOCK_CONFIRMATION_REPLAYED' : 'AIMLOCK_RENEWAL_ALREADY_AUTHORIZED',
@@ -136,6 +139,7 @@ async function renewReadBudgetTime(root, authority, path) {
   const state = authority.state
   const now = Date.now()
   const budget = budgetView(state, now)
+  if (budget.enforcement === 'continuous') return state
   if (budget.remainingDurationMs > 0) return state
   const renewal = state.autoRenew
   if (!renewal || renewal.status !== 'active') {
@@ -172,7 +176,7 @@ async function stopReadBudgetRenewal(input) {
   }
   return withFileLock(managedPath(root, 'runs', chainId, 'read-budget.json'), async () => {
     const { state, path } = await readBudget(root, chainId)
-    if (state.completedAt || (input.reason === 'revoked' && state.autoRenew?.status === 'revoked')) return budgetView(state)
+    if (state.completedAt || (input.reason === 'revoked' && state.autoRenew?.status === 'revoked')) return stoppedBudgetView(state)
     if (input.reason === 'revoked' && !state.autoRenew) {
       fail('AIMLOCK_RENEWAL_NOT_AUTHORIZED', 'this task has no automatic renewal authorization to revoke')
     }
@@ -182,8 +186,15 @@ async function stopReadBudgetRenewal(input) {
     if (state.autoRenew) updated.autoRenew = { ...state.autoRenew, status: input.reason, stoppedAt: at }
     await atomicJson(path, updated)
     await appendAudit(root, { event: 'read-budget-auto-renew-stopped', chainId, reason: input.reason, at })
-    return budgetView(updated)
+    return stoppedBudgetView(updated)
   })
+}
+
+function stoppedBudgetView(state) {
+  if (state.completedAt || Object.hasOwn(state, 'executionContext')) return budgetView(state)
+  return { schemaVersion: state.schemaVersion, chainId: state.chainId,
+    status: 'renewal-revoked', executionContextRequired: true,
+    nextActions: ['budget-context'], autoRenew: state.autoRenew }
 }
 
 async function completeReadBudgetIfExists(root, chainId) {

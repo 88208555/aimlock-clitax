@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.39
+Package version: v7.0.40
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -63,8 +63,8 @@ Only after the applicability gate activates Aimlock:
 
 1. Call local `capabilities`, then `probe`; use only its filesystem, Git-history, package-boundary, and import-graph facts for the initial mode. Exact `targetSymbols` may resolve through a fresh ContextBase map; missing, ambiguous, or stale map entries block.
 2. Call remote `capabilities`, `intake`, and `classify`. A fallback `bypass` response stops the Aimlock chain.
-3. Call `scope-contract`; empty allowed paths are blocked. Initialize the mode's local read budget before exploration. For expected long work, request the exact bounded renewal policy now, before deep reads; reuse the actual approval rather than asking again after each interval.
-4. Route every source read through local `budget-read`. File/token exhaustion requires `execute`, `plan`, or `blocked`, or an exact Confirm Protocol budget extension. Time may renew automatically only after the one-time task-bound approval described below.
+3. Call `scope-contract`; empty allowed paths are blocked. Determine the actual execution context as described below. Initialize a read budget before exploration only when cloud sandboxing is enabled and this task actually uses it; for expected long sandbox work, request the exact bounded renewal policy before deep reads and reuse its approval.
+4. In an active cloud sandbox, route every source read through local `budget-read`; file/token exhaustion requires `execute`, `plan`, or `blocked`, or an exact Confirm Protocol budget extension. Time may renew only with the task-bound approval below. Local or confirmed non-sandbox execution continues automatically within the accepted scope; the host may retain `budget-read` for audit without budget prompts.
 5. Call `skill-route`. The server queries the current published official directory and injects only matched skills.
 6. The current agent inspects and proposes modification nodes in every mode. Delegate read-only inspection only when the shared business-necessity gate passes; Probe/Swarm mode never requires creating workers.
 7. Call `propose-nodes`, `accept-nodes`, `snapshot-plan`, and `snapshot-verify` in order.
@@ -104,13 +104,25 @@ Caller-supplied full catalogs and local registry flags are forbidden. `serverRes
 - `run-status`, `chain-plan`, `chain-status`
 - `delivery-doc`, `validate-json`, `feedback`
 
-Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-read`, `budget-status`, `budget-extend`, `budget-auto-renew-request`, `budget-auto-renew`, `budget-auto-renew-stop`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
+Trusted local operations: `capabilities`, `probe`, `reassess`, `budget-init`, `budget-context`, `budget-read`, `budget-status`, `budget-extend`, `budget-auto-renew-request`, `budget-auto-renew`, `budget-auto-renew-stop`, `gate-issue`, `gate-verify`, and `guarded-write`. Invoke them as `cli-aimlock local <operation> <repositoryRoot>` with JSON stdin and call local `capabilities` first for every input Schema.
 
 `chain-plan` accepts only server-resolved skill IDs. High-risk work is blocked unless both Confirm Protocol and Validator were resolved. Confirm Protocol is forced to the first step; the caller must invoke the returned `confirmProtocolRequest`, then submit its authoritative `interaction-answer` response with the same `confirmationRequestId`. Replayed or mismatched approval remains blocked. When `swarm` is present, the plan inserts the internal `coordinator.conflict-scan` step immediately before it; no unrelated external skill is added.
 
-## Long-task read-time renewal
+## Read-budget applicability and execution context
 
-Swarm starts with 60 minutes; Lock and Probe remain 2 and 8 minutes. Time is wall-clock elapsed since budget initialization, including waits. Renewal is evaluated on a budgeted source/cache read, never by `budget-status` or a background timer.
+Read limits, deadlines, extensions and renewal approvals apply only when `executionContext.cloudSandboxEnabled` is `true` **and** `executionContext.executionIsolation` is `"sandbox"`. Enabling Aimlock, selecting Swarm, or running a long task does not activate a cloud sandbox budget by itself.
+
+For purely local work, use `executionContext: {"executionIsolation":"local"}`; no cloud query is needed. For remote work, retain the same task's successful runtime response's top-level `executionContext: {cloudSandboxEnabled, executionIsolation}`. Remote isolation is `"direct"` or `"sandbox"`; never substitute caller assertions, model output, a settings screenshot or another task's response for these authoritative facts. If remote execution state is missing or unknown, use a read-only query of the original invocation before dependent work; do not assume the sandbox is disabled or request a budget extension.
+
+`budget-init` requires an explicit `executionContext`. Existing budgets use `budget-context` with `{chainId, executionContext}` to bind or update the actual environment; this preserves usage, deadlines and authorization. An expired legacy budget is not a reason to ask for more allowance when the task is local or confirmed non-sandbox.
+
+Local or confirmed non-sandbox work continues within the already authorized goal and scope, without a read-budget setup requirement or budget confirmations. Hosts retaining `budget-read` for audit receive `enforcement: "continuous"`, null limits and remaining allowance, `decisionRequired: false`, and `nextActions: ["budget-read"]`. Do not generate extension or renewal interactions in this mode. Accepted scope, write gates, dependency coordination, completion and revocation still apply.
+
+## Cloud-sandbox long-task read-time renewal
+
+Apply this section only after the enabled-and-actually-used cloud sandbox condition above is established. Local or confirmed non-sandbox tasks do not request these approvals.
+
+Swarm starts with 60 minutes; Lock and Probe remain 2 and 8 minutes. Time accumulates during active cloud-sandbox execution, including waits in that mode. Local/direct intervals and reads do not consume sandbox quota; changing execution context preserves previously consumed quota. Renewal is evaluated on a budgeted source/cache read, never by `budget-status` or a background timer.
 
 An expired but still authorized budget reports `autoRenewEligible: true`, `decisionRequired: false`, and `nextActions: ["budget-read"]`; continue through that read operation to apply the permitted time extension. A status query never consumes an interval.
 
@@ -118,7 +130,7 @@ An expired but still authorized budget reports `autoRenewEligible: true`, `decis
 2. Render that interaction to the user once and obtain an authoritative Confirm Protocol `interaction-answer` response. Invoke `budget-auto-renew` with the same chain/scope/policy and that `confirmation`. A generic earlier approval, remembered response, altered scope or replay does not authorize renewal.
 3. Expired reads within that scope automatically consume the required fixed intervals up to the approved `maxRenewals`. Each interval records its reason, timestamp, count and cumulative duration. File/token limits and write permissions do not increase; exhausted quotas or renewal caps still explicitly block. Missed wall-clock intervals count toward the cap.
 4. Call `budget-auto-renew-stop` with `reason: "revoked"` when the user revokes renewal, and `reason: "completed"` when the task finishes. Completion prohibits further reads. The local persistent chain executor also closes an existing budget when execution succeeds. Other IDE hosts must send the completion signal; this package cannot observe unrelated IDE completion automatically.
-5. The authorization is immutable for that chain. Revocation never creates a new allowance; a later expansion requires a separate exact `budget-extend` approval, and a new task must use its own chain. Never infer permission from a long-running task or from authorization to implement this feature.
+5. The sandbox renewal authorization is immutable for that chain. Revocation never creates a new allowance; a later sandbox budget expansion requires a separate exact `budget-extend` approval, and a new task must use its own chain. A long-running task or permission to implement a feature does not by itself authorize additional cloud-sandbox budget. This condition does not require budget approval for local or confirmed non-sandbox continuation within the already accepted scope.
 
 Example request input: `{"chainId":"task-42","requestId":"renew-task-42","scope":{"goal":"Complete the approved refactor","allowedPaths":["src/module"]},"policy":{"intervalMs":3600000,"maxRenewals":8}}`.
 
@@ -146,7 +158,7 @@ Aimlock returns the protocol; it does not start a timer.
 | A3 | 官方技能按需路由 | 已实现 | 服务端读取当前已发布官方目录，只注入与需求匹配的技能；不加载完整目录。 |
 | A4 | 快照写入门禁 | 已实现（需宿主路由） | 本地运行器重读真实文件副本并签发 Ed25519 短期凭证；凭证绑定 chainId、快照摘要和路径。只有经过 `guarded-write` 的写入能被物理拦截，IDE 宿主必须关闭旁路批量写入口。 |
 | A5 | 真实分档与逐级升级 | 已实现 | 本地读取真实路径、Git 历史、包边界和 import 图；可从新鲜 ContextBase 地图解析精确目标符号；调用方自报复杂度不能覆盖探测，升级继承现有证据。 |
-| A6 | 读取预算与截止 | 已实现（需宿主路由） | Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/60 分钟；Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额。 |
+| A6 | 读取预算与截止 | 已实现（需宿主路由） | 仅云端沙箱已开启且本任务实际使用 sandbox 时，Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/60 分钟，Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额；本地或已确认非沙箱执行按已授权范围自动持续。 |
 | A7 | AutoCoord 物理联锁 | 已实现（需宿主路由） | `gate-issue` 显式选择是否需要协调；协调凭证绑定 Swarm 签名文件租约，`guarded-write` 在同一临界区校验凭证、活动锁和路径范围。活动依赖等待会阻断预算读取。 |
 | A8 | 高风险确认联锁 | 已实现（需宿主调用） | 高风险需求自动路由 Confirm Protocol；`chain-plan` 在权威 `interaction-answer` 返回前保持阻断，并校验请求 ID、审计与回调绑定。 |
 
@@ -154,7 +166,7 @@ Aimlock returns the protocol; it does not start a timer.
 
 - Never mutate before accepted nodes and verified file-copy snapshots.
 - Never claim global write interception unless the IDE host routes every batch write through `guarded-write`; the package cannot intercept unrelated operating-system writes by itself.
-- Never read source outside `budget-read` after a budget is initialized. Estimated tokens use the documented UTF-8-bytes/4 ceiling and are not an exact tokenizer count.
+- In an enabled and actually used cloud sandbox, never read source outside `budget-read` after a budget is initialized. Local or confirmed non-sandbox hosts may retain that route for audit without enforcing read limits. Estimated tokens use the documented UTF-8-bytes/4 ceiling and are not an exact tokenizer count.
 - Never issue a coordinated pass without a current signed `.coord` file lease. Never read while the same chain has an active `dependency-wait`.
 - Never treat missing server routing, files, timeouts, or HTTP errors as empty success.
 - Never send credentials in the request envelope.
@@ -212,13 +224,13 @@ Aimlock returns the protocol; it does not start a timer.
 3. 自报、回复送达和动作完成不等于工程交付验证。reported始终待验收；Swarm接受工程任务时复用Validator校验签名、有效期、计划/产物/任务绑定。无证据、伪造runner或失败检查不得成为绿色完成。
 4. 原任务交接前保存检查点并释放旧锁；回程只发持久通知，宿主消费后重新核验基线、快照与写入权限。历史恢复结果不是新授权。技能不能自行唤醒未接入的IDE。
 5. 心跳停止仅允许自动回收尚未开工的assigned任务；claimed/running进入执行结果待核对状态，禁止盲目重复执行。已回传、已验收、失败和取消任务不会被自动重派。服务器停滞回收同时保存会员通知，对话界面定期读取展示。
-6. 预计长任务在预算初始化后、深读前提出一次精确自动续时策略；只有真实授权才自动续时。时间、文件数、token和写入权限分别计量；额度/次数耗尽、撤销和完成必须明确停止并说明下一步。读取预算不是付费充值，计时器由宿主运行。
-7. 云端沙箱开关按调用会员读取；关闭时仅允许当前受审官方源码摘要在受控worker中直接执行，并记录executionIsolation。未知或修改过的源码明确要求sandbox，不伪造隔离结果；worker直接执行不是OS沙箱。
+6. 读取预算、截止和续时确认仅在云端沙箱已开启且本任务实际使用 sandbox 时生效。纯本地或权威响应确认的非沙箱执行，在已授权目标和范围内自动持续，不因旧预算过期、文件数或token额度暂停，也不生成扩展或续时确认；宿主可保留budget-read审计。远端状态未知时只读查询原调用，不推定关闭，不要求扩预算；纯本地无需查询云端。仅实际沙箱内预计长任务在预算初始化后、深读前提出一次精确自动续时策略，真实授权后才自动续时；时间、文件数、token和写入权限分别计量，额度/次数耗尽、撤销和完成保留明确停止规则。读取预算不是付费充值，续时由宿主在读取时触发。
+7. 云端沙箱开关按调用会员读取；关闭时仅允许当前受审官方源码摘要在受控worker中直接执行，并记录executionIsolation。预算上下文取同一任务成功runtime响应顶层executionContext，包含cloudSandboxEnabled与executionIsolation；仅true且sandbox启用预算，不用模型自报、调用方参数或旧截图代替真实执行状态。纯本地显式使用{executionIsolation:"local"}；已有预算通过budget-context绑定或更新实际环境，保留原用量、期限和授权。未知或修改过的源码明确要求sandbox，不伪造隔离结果；worker直接执行不是OS沙箱。
 8. 使用技能前检查官方发布版本并自动升级可管理的安装副本与客户端；配置失败或升级失败停止并报告。通过configure的JSON标准输入导入一次账号凭据，后续项目/分支/任务共享；密钥不进入源码、URL或命令参数。显式环境覆盖必须是绝对路径。网页复制在点击时获取当前凭据，页面仅展示无密钥地址；已撤销密钥没有权限自动获取新密钥，需已认证网页重新同步一次。
 
-English: keep simple work with the main agent. Delegate only substantial independent business deliverables when benefits exceed coordination costs; use the fewest needed agents, never create idle management agents. Enabling Aimlock does not authorize delegation. Finish all authorized work; a cost complaint is not a stop request. Preserve the original goal; verify execution evidence; resume from durable checkpoints; never replay uncertain side effects. Read-time renewal requires bounded approval. Reuse account credentials and check managed skill updates before use; revoked credentials require an authenticated refresh.
+English: keep simple work with the main agent. Delegate only substantial independent business deliverables when benefits exceed coordination costs; use the fewest needed agents, never create idle management agents. Enabling Aimlock does not authorize delegation. Finish all authorized work; a cost complaint is not a stop request. Preserve the original goal; verify execution evidence; resume from durable checkpoints; never replay uncertain side effects. Read budgets and bounded renewal approvals apply only when cloud sandboxing is enabled and actually used for this task. Local or confirmed non-sandbox work continues within its authorized scope without budget prompts; unknown remote state requires a read-only query, never an assumed opt-out or an extension request. Reuse account credentials and check managed skill updates before use; revoked credentials require an authenticated refresh.
 
-Русский: сохраняйте исходную цель, проверяйте доказательства выполнения и возобновляйте работу из сохранённой точки. Не повторяйте операции с неизвестным результатом. Продление чтения требует ограниченного разрешения; ключи учётной записи используются повторно, обновления навыков проверяются перед вызовом.
+Русский: сохраняйте исходную цель, проверяйте доказательства выполнения и возобновляйте работу из сохранённой точки. Не повторяйте операции с неизвестным результатом. Бюджет чтения и ограниченное разрешение на продление действуют только при включённой облачной песочнице, фактически используемой этой задачей. Локальная работа и подтверждённое выполнение без песочницы продолжаются в разрешённых пределах без запросов бюджета; неизвестное удалённое состояние требует запроса только для чтения, а не предположения об отключении или запроса расширения. Ключи учётной записи используются повторно, обновления навыков проверяются перед вызовом.
 
 ## 账号共享凭据与自动更新
 
