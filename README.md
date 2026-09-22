@@ -52,6 +52,8 @@ cli-aimlock local guarded-write .
 
 Swarm 模式下，`chain-plan` 会在 `swarm` 前插入 `coordinator.conflict-scan`。`gate-issue` 必须显式声明 `coordinationRequired`；为 true 时凭证绑定 `.coord/leases/` 中的签名文件锁，`guarded-write` 在同一拦截点同时校验门禁与活动租约。存在活动 `dependency-wait` 的 chain 会被 `budget-read` 拒绝。
 
+多个独立任务同时触及相同路径时，通过 `cli-aimlock tasks peer-coordinate/peer-status/peer-complete` 做同级协商，并显式选择 `background`、`normal`、`high` 或 `urgent`。它只暂停重叠路径，非冲突部分继续执行；高优先级越过尚未拿锁的等待项，活动锁只由占用方在安全检查点释放。双方保留原目标和执行权，不相互委派。`peer-ready` 到达后必须重新读取目标文件、生成新鲜快照并取得新的签名文件锁。超过 `coordinationTimeoutMs` 后宿主按唯一请求新建任务窗口并调用 `peer-spawn-bind` 迁移阻塞路径；派生任务禁止再次派生，防止在原任务之间循环。旧快照、旧通知和其他任务的租约都不是写入授权。
+
 物理边界：本包能拒绝所有经过 `guarded-write` 的无证写入，但不能劫持任意 IDE 的系统调用。IDE 集成必须禁止其他批量写入口，并让门禁运行在独立低权限宿主中；否则不得声称实现了全局物理拦截。
 
 

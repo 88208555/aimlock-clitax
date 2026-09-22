@@ -7,7 +7,9 @@ const TASK_INPUT_MAX_BYTES = 1_048_576
 const MAX_TASK_DELIVERY_TIMEOUT_MS = 2_147_483_647
 export const TASK_DELIVERY_TIMEOUT_MS = 30_000
 export const TASK_OPERATIONS = Object.freeze([
-  'task-describe', 'task-checkpoint', 'task-resume', 'message-route', 'message-status',
+  'task-describe', 'task-checkpoint', 'task-resume', 'peer-coordinate', 'peer-status',
+  'peer-spawn-bind', 'peer-complete',
+  'message-route', 'message-status',
   'message-accept', 'message-complete', 'message-delivery-start', 'message-delivery-report',
   'message-resolve', 'handoff-release', 'handoff-resume',
 ])

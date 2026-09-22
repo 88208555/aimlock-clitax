@@ -90,6 +90,10 @@ async function verifyLeaseAgainstState(state, root, input) {
     && lock?.status === 'active' && lock.leaseId === lease.leaseId
     && state.tasks.some((task) => task.taskId === lock.taskId && task.status === 'active')
     && lock.chainId === lease.chainId && lock.agentId === lease.agentId
+    && lock.peerIntentId === lease.peerIntentId
+    && (!lease.peerIntentId || state.messages.some((message) => message.schemaVersion === 'swarm.peer-intent/1.0'
+      && message.intentId === lease.peerIntentId && message.taskId === lock.taskId
+      && message.agentId === lock.agentId && message.chainId === lock.chainId && message.status === 'active'))
     && lock.expiresAt === lease.expiresAt
   if (!valid) {
     fail('AIMLOCK_COORDINATION_LEASE_INVALID', 'coordination lease is forged, expired, released, or outside its lock scope')

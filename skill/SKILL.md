@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.41
+Package version: v7.0.42
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -68,7 +68,7 @@ Only after the applicability gate activates Aimlock:
 5. Call `skill-route`. The server queries the current published official directory and injects only matched skills.
 6. The current agent inspects and proposes modification nodes in every mode. Delegate read-only inspection only when the shared business-necessity gate passes; Probe/Swarm mode never requires creating workers.
 7. Call `propose-nodes`, `accept-nodes`, `snapshot-plan`, and `snapshot-verify` in order.
-8. Issue a local signed mutation pass after `mutate-gate` permits the verified snapshot. Route each batch write through local `guarded-write` with the same chainId and pass.
+8. Issue a local signed mutation pass after `mutate-gate` permits the verified snapshot. Route each batch write through local `guarded-write` with the same chainId and pass. When existing tasks collide on paths, use `tasks peer-coordinate`, continue only returned non-conflicting paths, and never turn the collision into delegation or takeover. Declare `coordinationTimeoutMs`; a timeout produces one idempotent new-window request, and `peer-spawn-bind` moves only blocked paths to the registered task. Spawned intents cannot spawn again.
 9. If actual files or changed lines exceed the contract budget, call local `reassess`; upgrade only one level and preserve the current snapshot, changes, and evidence. Tell the user when this occurs.
 10. Call `continuity-check` with real TestEvidence. Yellow or red means restore the copied snapshot.
 11. Use `keep-alive` only while an active Aimlock goal is incomplete.
@@ -160,12 +160,14 @@ Aimlock returns the protocol; it does not start a timer.
 | A5 | 真实分档与逐级升级 | 已实现 | 本地读取真实路径、Git 历史、包边界和 import 图；可从新鲜 ContextBase 地图解析精确目标符号；调用方自报复杂度不能覆盖探测，升级继承现有证据。 |
 | A6 | 读取预算与截止 | 已实现（需宿主路由） | 仅云端沙箱已开启且本任务实际使用 sandbox 时，Lock/Probe/Swarm 限制 3/10/30 文件与 2/8/60 分钟，Probe/Swarm 另限 30K/100K 估算 token，并用进程间锁阻止并发超额；本地或已确认非沙箱执行按已授权范围自动持续。 |
 | A7 | AutoCoord 物理联锁 | 已实现（需宿主路由） | `gate-issue` 显式选择是否需要协调；协调凭证绑定 Swarm 签名文件租约，`guarded-write` 在同一临界区校验凭证、活动锁和路径范围。活动依赖等待会阻断预算读取。 |
+| A8 | 同级任务协商 | 已实现（需宿主轮询） | `tasks peer-coordinate/peer-status/peer-spawn-bind/peer-complete` 提供四级优先队列且只冻结重叠路径；超时只请求一个新任务窗口，派生意图禁止再次派生；解锁通知要求重取基线、新鲜快照和新签名锁。 |
 | A8 | 高风险确认联锁 | 已实现（需宿主调用） | 高风险需求自动路由 Confirm Protocol；`chain-plan` 在权威 `interaction-answer` 返回前保持阻断，并校验请求 ID、审计与回调绑定。 |
 
 ## Safety
 
 - Never mutate before accepted nodes and verified file-copy snapshots.
 - Never claim global write interception unless the IDE host routes every batch write through `guarded-write`; the package cannot intercept unrelated operating-system writes by itself.
+- Peer coordination is not delegation. Each task retains its original goal and execution right. Priorities are background, normal, high, and urgent; they can reorder unstarted writes but never revoke an active signed lock. `peer-ready` is a durable refetch notice, never a mutation credential, and lower-priority work remains queued until later completion. A coordination timeout emits one idempotent new-window request; after `peer-spawn-bind`, the spawned intent cannot spawn recursively.
 - In an enabled and actually used cloud sandbox, never read source outside `budget-read` after a budget is initialized. Local or confirmed non-sandbox hosts may retain that route for audit without enforcing read limits. Estimated tokens use the documented UTF-8-bytes/4 ceiling and are not an exact tokenizer count.
 - Never issue a coordinated pass without a current signed `.coord` file lease. Never read while the same chain has an active `dependency-wait`.
 - Never treat missing server routing, files, timeouts, or HTTP errors as empty success.
@@ -222,7 +224,7 @@ Aimlock returns the protocol; it does not start a timer.
 1. 工程目标、已接受范围和验收项必须持久化；新增需求先路由与合并，不能覆盖原目标。子任务有明确服务目标的理由，执行仅用本链已匹配技能。每次恢复读取 task-resume，核对剩余项、pending请求和continuationNotifications。
 2. 默认由主代理完成工作，禁止为了省事创建子代理、把简单查找/改名/少量修改/单条命令/例行检查/汇总交接给多智能体，禁止为达到门槛拆分或夸大任务。启用Aimlock或Swarm模式不是创建授权，管理/运维/安全/协调是主代理职责，不额外创建常驻智能体。只有业务确需独立且实质性的交付、主代理同时有可推进的独立工作、预期收益严格高于上下文传递/协调/验收成本时才派单；复用已有合适负责人，用户禁止委派时不得创建。每次创建前记录业务理由、交付物、验收项、主代理工作、成本收益、精确路径和原负责人；只创建当前需要的最少数量，不预建空闲角色，不递归扩编或重复扫描。规模门槛200行/3文件/跨模块仅为必要条件，不能单独证明值得委派。主代理负责整合和完整验收，不把半成品当完成；预算抱怨不是停止指令。
 3. 自报、回复送达和动作完成不等于工程交付验证。reported始终待验收；Swarm接受工程任务时复用Validator校验签名、有效期、计划/产物/任务绑定。无证据、伪造runner或失败检查不得成为绿色完成。
-4. 原任务交接前保存检查点并释放旧锁；回程只发持久通知，宿主消费后重新核验基线、快照与写入权限。历史恢复结果不是新授权。技能不能自行唤醒未接入的IDE。
+4. 原任务交接前保存检查点并释放旧锁；同级任务冲突则用peer意图拆分路径，不得伪装成交接或委派。回程与peer-ready都只发持久通知，宿主消费后重新核验基线、快照与写入权限。历史恢复结果不是新授权。技能不能自行唤醒未接入的IDE。
 5. 心跳停止仅允许自动回收尚未开工的assigned任务；claimed/running进入执行结果待核对状态，禁止盲目重复执行。已回传、已验收、失败和取消任务不会被自动重派。服务器停滞回收同时保存会员通知，对话界面定期读取展示。
 6. 读取预算、截止和续时确认仅在云端沙箱已开启且本任务实际使用 sandbox 时生效。纯本地或权威响应确认的非沙箱执行，在已授权目标和范围内自动持续，不因旧预算过期、文件数或token额度暂停，也不生成扩展或续时确认；宿主可保留budget-read审计。远端状态未知时只读查询原调用，不推定关闭，不要求扩预算；纯本地无需查询云端。仅实际沙箱内预计长任务在预算初始化后、深读前提出一次精确自动续时策略，真实授权后才自动续时；时间、文件数、token和写入权限分别计量，额度/次数耗尽、撤销和完成保留明确停止规则。读取预算不是付费充值，续时由宿主在读取时触发。
 7. 云端沙箱开关按调用会员读取；关闭时仅允许当前受审官方源码摘要在受控worker中直接执行，并记录executionIsolation。预算上下文取同一任务成功runtime响应顶层executionContext，包含cloudSandboxEnabled与executionIsolation；仅true且sandbox启用预算，不用模型自报、调用方参数或旧截图代替真实执行状态。纯本地显式使用{executionIsolation:"local"}；已有预算通过budget-context绑定或更新实际环境，保留原用量、期限和授权。未知或修改过的源码明确要求sandbox，不伪造隔离结果；worker直接执行不是OS沙箱。
