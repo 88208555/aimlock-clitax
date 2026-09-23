@@ -29,7 +29,8 @@ export async function initializeExecution(repositoryRoot, planInput) {
 async function failedStep(session, error) {
   const { record, state, file } = session
   record.error = errorRecord(error)
-  record.status = record.calls.at(-1)?.status === 'uncertain' ? 'uncertain' : 'failed'
+  const callStatus = record.calls.at(-1)?.status
+  record.status = callStatus === 'uncertain' ? 'uncertain' : callStatus === 'not-sent' ? 'pending' : 'failed'
   record.completedAt = new Date().toISOString()
   await saveExecution(file, state)
 }

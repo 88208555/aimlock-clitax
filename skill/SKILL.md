@@ -5,7 +5,7 @@ description: "Aimlock 仅用于大型、深度、跨模块、高风险、需要�
 
 # Aimlock Skill
 
-Package version: v7.0.42
+Package version: v7.0.43
 
 Endpoint: https://cli.tax/R3mQ8kWpXn
 
@@ -205,7 +205,9 @@ Aimlock returns the protocol; it does not start a timer.
 
 ## 网络中断与原回执恢复
 
-仅在 TLS 握手前确定尚未发送 HTTP 请求时，broker 才允许最多 3 次连接尝试，并受总超时约束。请求发出后发生断线或响应中断，只用 GET 查询原 requestId 的服务端回执，禁止重发 POST；未取得有效回执时保留不确定状态，不得假定成功或继续依赖步骤。
+仅在确定技能 POST 尚未发送时才重试：版本查询属于只读 GET；TLS 握手前失败也没有产生技能调用或计费。broker 会在发送前连接阶段有限重试，chain 对明确未发送的失败再有限重试，耗尽后保留原链的待执行步骤，连接恢复时继续 `chain resume`。这些安全重试和查询原回执均不需要重新征求用户授权，也不得要求新建 Aimlock 链。
+
+请求发出后发生断线或响应中断，只用 GET 查询原 requestId 的服务端回执，禁止重发 POST；未取得有效回执时保留不确定状态，不得假定成功或继续依赖步骤。优先从失败 JSON 的 `error.requestId` 或 `.aimlock/executions/<chainId>/state.json` 取原编号，继续查询同一请求；不要把“连接断开”本身解释为用户需要重新授权。若确实无法找到编号，应保留原任务、检查调用记录并继续不依赖该结果的工作，不能盲目重新调用付费操作。
 
 `npx cli-aimlock@latest recover <operation> <requestId>` 可重新查询原调用，不会重做操作或重复计费。链恢复不会跳过人工确认，也不会自动重跑结果不确定的本地命令。代理连接需 Node.js 22.21+ 或 24.5+；不支持的运行时会明确报错。
 

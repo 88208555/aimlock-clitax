@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { executeCoordinatorOperation } from 'cli-swarm/coordinator'
 import { loadOfficialSkillContext } from './installer.mjs'
 import { invokeOfficialSkill, recoverOfficialSkill } from './broker.mjs'
+import { BrokerTransportError } from './broker-transport.mjs'
 import { fail, sha256 } from './aimlock-local-fs.mjs'
 import { errorRecord } from './aimlock-chain-model.mjs'
 import { saveExecution } from './aimlock-chain-store.mjs'
 import { executeCommand } from './aimlock-chain-process.mjs'
+
+const SAFE_CONNECT_RETRIES = 2
+const SAFE_CONNECT_RETRY_DELAY_MS = 500
 
 export function resolveContexts(root, plan) {
   return plan.skills.map((skill) => {
@@ -38,7 +43,10 @@ async function startCall(session, kind, operation, input) {
 }
 
 async function failCall(session, call, error) {
-  call.status = call.requestId || call.pid !== null ? 'uncertain' : 'failed'
+  const definitelyUnsent = call.kind === 'skill'
+    && (!call.requestId && error instanceof BrokerTransportError
+      || error?.code === 'NETWORK_TRANSPORT' && error.transport?.submitted === false)
+  call.status = definitelyUnsent ? 'not-sent' : call.requestId || call.pid !== null ? 'uncertain' : 'failed'
   call.error = errorRecord(error)
   call.completedAt = new Date().toISOString()
   await saveExecution(session.file, session.state)
@@ -46,31 +54,34 @@ async function failCall(session, call, error) {
 
 export async function callSkill(session, skillId, operation, input) {
   const context = skillContext(session.state, skillId)
-  const call = await startCall(session, 'skill', operation, input)
-  try {
-    const dependencies = session.dependencies
-    const invocation = await invokeOfficialSkill(context, operation, input, {
-      environment: dependencies.environment, credentialAccess: dependencies.credentialAccess,
-      workingDirectory: session.root, homeDirectory: dependencies.homeDirectory,
-      request: async (url, options) => {
-        if (options.method === 'POST') {
-          const request = JSON.parse(options.body).input
-          call.requestId = request.requestId
-          call.requestSchemaVersion = request.schemaVersion
-          call.status = 'dispatched'
-          await saveExecution(session.file, session.state)
-        }
-        return dependencies.request(url, options)
-      },
-    })
-    call.receipt = invocation
-    call.status = 'recorded'
-    call.completedAt = new Date().toISOString()
-    await saveExecution(session.file, session.state)
-    return invocation.response.output
-  } catch (error) {
-    await failCall(session, call, error)
-    throw error
+  for (let attempt = 0; attempt <= SAFE_CONNECT_RETRIES; attempt += 1) {
+    const call = await startCall(session, 'skill', operation, input)
+    try {
+      const dependencies = session.dependencies
+      const invocation = await invokeOfficialSkill(context, operation, input, {
+        environment: dependencies.environment, credentialAccess: dependencies.credentialAccess,
+        workingDirectory: session.root, homeDirectory: dependencies.homeDirectory,
+        request: async (url, options) => {
+          if (options.method === 'POST') {
+            const request = JSON.parse(options.body).input
+            call.requestId = request.requestId
+            call.requestSchemaVersion = request.schemaVersion
+            call.status = 'dispatched'
+            await saveExecution(session.file, session.state)
+          }
+          return dependencies.request(url, options)
+        },
+      })
+      call.receipt = invocation
+      call.status = 'recorded'
+      call.completedAt = new Date().toISOString()
+      await saveExecution(session.file, session.state)
+      return invocation.response.output
+    } catch (error) {
+      await failCall(session, call, error)
+      if (call.status !== 'not-sent' || attempt === SAFE_CONNECT_RETRIES) throw error
+      await delay(SAFE_CONNECT_RETRY_DELAY_MS * (attempt + 1))
+    }
   }
 }
 

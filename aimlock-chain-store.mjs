@@ -156,6 +156,10 @@ export function recoverInterrupted(state) {
       lastCall.completedAt = new Date().toISOString()
     }
     if (step.status !== 'running') continue
+    if (lastCall?.kind === 'skill' && lastCall.status === 'not-sent') {
+      step.status = 'pending'
+      continue
+    }
     if (step.pending?.kind === 'coordinator-wait'
       && step.calls.at(-1)?.kind === 'coordinator' && step.calls.at(-1)?.operation === 'wait-for-event') {
       step.calls.at(-1).status = 'interrupted-read'

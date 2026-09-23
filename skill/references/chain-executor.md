@@ -76,7 +76,7 @@ cli-aimlock chain answer /absolute/repository my-chain human-actor
 - 遇到 Swarm 高风险裁决，必须在 skills 声明 confirm-protocol 包。宿主真实调用 interaction-request，保存待答状态。resume 不会代答；answer 读取终端输入、真实调用 interaction-answer，校验问题/答案/回调绑定后才调用 resolve-human。
 - 普通 Confirm 步骤还必须声明结构化继续条件，例如步骤字段 `continueWhen: {"answer":"yes"}`。协议没有通用“同意”的 option ID；不依据 label 推测授权。真人答案未匹配或未声明条件时，下游保持 blocked；choice/input/multi 同样须明确条件。
 - Validator 的协议 succeeded 不代表验收通过：verdict=incomplete/blocked、空或失败执行证据、sandbox-run 等 pending-execution 描述均阻塞链。原协议结果与回执仍保留，不能冒充已执行测试。
-- 普通技能 blocked/failed 保持阻塞/失败，不自动重试。发送后断线、无法校验回执、执行中断等不确定结果禁止自动重发；应先人工核查外部效果，再制定新计划。已登记的事件等待可恢复轮询，不重新声明等待。
+- 普通技能 blocked/failed 保持阻塞/失败，不自动重试。版本查询失败或确认技能 POST 未发送时，chain 有限重试，耗尽后保持原步骤待执行；连接恢复后继续原链即可。发送后断线、无法校验回执等不确定结果只查询原 requestId 的服务端回执，禁止重发 POST；查询不需要用户重新授权或新链。已登记的事件等待可恢复轮询，不重新声明等待。
 - 本地命令提供 `cli.tax.test-evidence/1.0`：真实 exitCode、durationMs、stdout/stderr 摘要；runner=local、producer=local-cli-process、independentRunnerVerified=false。可把 output.evidence 绑定到 Blueprint acceptance-report 的逐项 results；报告对账不等于独立可信执行。
 - 同链正常 completed 任务不再封锁活跃同伴；全部终态仍封锁。失败/回收任务必须显式注册 supersedesTaskId，保留原任务历史、范围与约束，并先处理人工裁决；任意新任务不构成失败豁免。
 - 人工选中 active 任务后，同链未选中的 human-decision 停放任务可继续保持 blocked；旧 lease 不能写入，因为写入联锁仍要求对应 taskId 为 active。未决裁决继续阻止读取与写入。
